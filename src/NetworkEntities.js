@@ -14,17 +14,67 @@ class NetworkEntities {
   createRemoteEntity(entityData) {
     NAF.log.write('Creating remote entity', entityData);
 
+    var networkId = entityData.networkId;
+
     var entity = document.createElement('a-entity');
-    entity.setAttribute('id', 'naf-' + entityData.networkId);
+    entity.setAttribute('id', 'naf-' + networkId);
 
     var template = entityData.template;
+    if (this.isDynamicTemplate(template)) {      
+      var templateData = this.parseDynamicTemplate(template);
+      this.addTemplateToAssets(networkId, templateData);
+      entityData.template = template = '#' + id;
+    }
+
+    if (template && entityData.physics) {
+      entity.addEventListener('loaded', function () {
+        var templateChild = entity.firstChild;
+        NAF.utils.monkeyPatchEntityFromTemplateChild(entity, templateChild);
+      });
+    }
+
     var components = NAF.schemas.getComponents(template);
     this.initPosition(entity, entityData.components);
     this.initRotation(entity, entityData.components);
     this.addNetworkComponent(entity, entityData, components);
-    this.entities[entityData.networkId] = entity;
+    this.entities[networkId] = entity;
 
     return entity;
+  }
+
+  isDynamicTemplate(template) {
+    return template.substring(0,5) === 'data:'
+  }
+
+  parseDynamicTemplate(template) {
+    var split = template.split(',', 2);
+    var inlineData = split[1];
+    var uriType = split[0].substring(5);
+    var isBase64 = uriType.endsWith(';base64');
+    if (isBase64) {
+      uriType = uriType.substring(0, uriType.length - 7);
+    }
+    inlineData = isBase64 ? window.atob(inlineData) : decodeURIComponent(inlineData);
+
+    var templateData = {
+      inlineData: inlineData,
+      uriType: uriType,
+    };
+    return templateData;
+  }
+
+  addTemplateToAssets(networkId, templateData) {
+    var uriType = templateData.uriType;
+    var inlineData = templateData.inlineData;
+
+    // blob URLs do not survive template load, so make script element.
+    var script = document.createElement('script');
+    var id = 'naf-tpl-' + entityData.networkId;
+    script.setAttribute('id', id);
+    script.setAttribute('type', uriType);
+    script.innerHTML = inlineData;
+    var assets = document.querySelector('a-assets');
+    assets.appendChild(script);
   }
 
   initPosition(entity, componentData) {
@@ -50,7 +100,12 @@ class NetworkEntities {
       networkId: entityData.networkId,
       components: components
     };
-    entity.setAttribute('networked-remote', networkData);
+    if (NAF.options.useShare) {
+      networkData.showLocalTemplate = true;
+      entity.setAttribute('networked-share', networkData);
+    } else {
+      entity.setAttribute('networked-remote', networkData);
+    }
     entity.firstUpdateData = entityData;
   }
 
@@ -66,6 +121,8 @@ class NetworkEntities {
   }
 
   receiveFirstUpdateFromEntity(entityData) {
+    console.log(entityData);
+
     var parent = entityData.parent;
     var networkId = entityData.networkId;
 
@@ -75,7 +132,7 @@ class NetworkEntities {
     } else {
       var remoteEntity = this.createRemoteEntity(entityData);
       this.createAndAppendChildren(networkId, remoteEntity);
-      this.addEntity(remoteEntity, parent);
+      this.addEntityToPage(remoteEntity, parent);
     }
   }
 
@@ -90,22 +147,22 @@ class NetworkEntities {
     }
   }
 
-  addEntity(entity, parentId) {
+  addEntityToPage(entity, parentId) {
     if (this.hasEntity(parentId)) {
       this.addEntityToParent(entity, parentId);
     } else {
-      this.addEntityToScene(entity);
+      this.addEntityToSceneRoot(entity);
     }
-  }
-
-  addEntityToScene(entity) {
-    var scene = document.querySelector('a-scene');
-    scene.appendChild(entity);
   }
 
   addEntityToParent(entity, parentId) {
     var parentEl = document.getElementById('naf-' + parentId);
     parentEl.appendChild(entity);
+  }
+
+  addEntityToSceneRoot(entity) {
+    var scene = document.querySelector('a-scene');
+    scene.appendChild(entity);
   }
 
   completeSync() {

@@ -2,6 +2,7 @@
 var aframe = require('aframe');
 var helpers = require('./helpers');
 var naf = require('../../src/NafIndex');
+var Compressor = require('../../src/Compressor');
 
 require('../../src/components/networked-remote');
 
@@ -219,6 +220,8 @@ suite('networked-remote', function() {
         'owner1',
         null,
         '',
+        null,
+        false,
         {
           0: { x: 10, y: 20, z: 30 },
           1: { x: 40, y: 30, z: 20 }
@@ -242,133 +245,5 @@ suite('networked-remote', function() {
 
       assert.equal(components['visible'].data, true, 'Visible');
     }));
-  });
-
-  suite('decompressSyncData', function() {
-
-    test('example packet', function() {
-      var components = {
-        position: { x: 1, y: 2, z: 3 },
-        rotation: { x: 4, y: 3, z: 2 }
-      };
-      var entityData = {
-        0: 1,
-        networkId: 'network1',
-        owner: 'owner1',
-        parent: null,
-        template: '',
-        components: components
-      };
-      var compressed = [
-        1,
-        entityData.networkId,
-        entityData.owner,
-        entityData.parent,
-        entityData.template,
-        {
-          0: components.position,
-          1: components.rotation
-        }
-      ];
-
-      var result = component.decompressSyncData(compressed);
-
-      assert.deepEqual(result, entityData);
-    });
-
-    test('example packet with non-sequential components', function() {
-      component.data.components = ['position', 'rotation', 'scale'];
-      var components = {
-        position: { x: 1, y: 2, z: 3 },
-        scale: { x: 10, y: 11, z: 12 }
-      };
-      var entityData = {
-        0: 1,
-        networkId: 'network1',
-        owner: 'owner1',
-        parent: null,
-        template: '',
-        components: components
-      };
-      var compressed = [
-        1,
-        entityData.networkId,
-        entityData.owner,
-        entityData.parent,
-        entityData.template,
-        {
-          0: components.position,
-          2: components.scale
-        }
-      ];
-
-      var result = component.decompressSyncData(compressed);
-
-      assert.deepEqual(result, entityData);
-    });
-
-    test('example packet with child component', function() {
-      var childComponent = {
-        selector: '.head',
-        component: 'visible'
-      };
-      component.data.components = ['position', 'rotation', 'scale', childComponent];
-
-      var components = {
-        position: { x: 1, y: 2, z: 3 },
-        scale: { x: 10, y: 11, z: 12 }
-      };
-      var childKey = '.head'+naf.utils.delimiter+'visible';
-      components[childKey] = false;
-
-      var entityData = {
-        0: 1,
-        networkId: 'network1',
-        owner: 'owner1',
-        parent: null,
-        template: '',
-        components: components
-      };
-
-      var compressed = [
-        1,
-        entityData.networkId,
-        entityData.owner,
-        entityData.parent,
-        entityData.template,
-        {
-          0: components.position,
-          2: components.scale,
-          3: components[childKey]
-        }
-      ];
-
-      var result = component.decompressSyncData(compressed);
-
-      assert.deepEqual(result, entityData);
-    });
-
-    test('example packet with no components', function() {
-      var entityData = {
-        0: 1,
-        networkId: 'network1',
-        owner: 'owner1',
-        parent: null,
-        template: '#template1',
-        components: {}
-      };
-      var compressed = [
-        1,
-        entityData.networkId,
-        entityData.owner,
-        entityData.parent,
-        entityData.template,
-        {}
-      ];
-
-      var result = component.decompressSyncData(compressed);
-
-      assert.deepEqual(result, entityData);
-    });
   });
 });

@@ -1,6 +1,4 @@
-var log = require("./NafLogger");
 var NetworkInterface = require('./network_interfaces/NetworkInterface');
-
 
 class NetworkConnection {
 
@@ -13,6 +11,10 @@ class NetworkConnection {
 
     this.loggedIn = false;
     this.onLoggedInEvent = new Event('loggedIn');
+    this.onPeerConnectedEvent = new Event('clientConnected');
+    this.onPeerDisconnectedEvent = new Event('clientDisconnected');
+    this.onDCOpenEvent = new Event('dataChannelOpened');
+    this.onDCCloseEvent = new Event('dataChannelClosed');
   }
 
   setNetworkInterface(network) {
@@ -48,8 +50,8 @@ class NetworkConnection {
     );
     this.network.setCloseListeners(reconnector("socket"), reconnector("peer"), reconnector("stream"));
     this.network.setLoginListeners(
-      this.loginSuccess.bind(this),
-      this.loginFailure.bind(this)
+        this.loginSuccess.bind(this),
+        this.loginFailure.bind(this)
     );
     this.network.setRoomOccupantListener(this.occupantsReceived.bind(this));
     this.network.joinRoom(roomId);
@@ -88,9 +90,7 @@ class NetworkConnection {
     this.loggedIn = false;
   }
 
-
   occupantsReceived(roomName, occupantList, isPrimary) {
-    console.log("occupants received");
     this.checkForDisconnectingClients(this.connectList, occupantList);
     for (var p in occupantList) {
       this.onOccupantReceived(occupantList[p]);
@@ -105,6 +105,7 @@ class NetworkConnection {
       if (!clientFound) {
         NAF.log.write('Closing stream to ', id);
         this.network.closeStreamConnection(id);
+        document.body.dispatchEvent(this.onPeerDisconnectedEvent);
       }
     }
   }
@@ -115,6 +116,7 @@ class NetworkConnection {
       if (startConnection) {
         NAF.log.write('Opening stream to ', id);
         this.network.startStreamConnection(id);
+        document.body.dispatchEvent(this.onPeerConnectedEvent);
       }
     }
   }
@@ -139,16 +141,24 @@ class NetworkConnection {
     NAF.log.write('Opened data channel from ' + id);
     this.dcIsActive[id] = true;
     this.entities.completeSync();
+    document.body.dispatchEvent(this.onDCOpenEvent);
   }
 
-  dcCloseListener(reconnector) {
-    return (id) => {
-      NAF.log.write('Closed data channel from ' + id);
-      this.dcIsActive[id] = false;
-      this.entities.removeEntitiesFromUser(id);
-      reconnector(id);
-    }
+  dcCloseListener(id) {
+    NAF.log.write('Closed data channel from ' + id);
+    this.dcIsActive[id] = false;
+    this.entities.removeEntitiesFromUser(id);
+    document.body.dispatchEvent(this.onDCCloseEvent);
   }
+  /*
+  * dcCloseListener(reconnector) {
+   return (id) => {
+   NAF.log.write('Closed data channel from ' + id);
+   this.dcIsActive[id] = false;
+   this.entities.removeEntitiesFromUser(id);
+   reconnector(id);
+   }
+   }*/
 
   dcIsConnectedTo(user) {
     return this.dcIsActive.hasOwnProperty(user) && this.dcIsActive[user];

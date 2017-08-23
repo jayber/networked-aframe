@@ -2,6 +2,7 @@
 var aframe = require('aframe');
 var helpers = require('./helpers');
 var naf = require('../../src/NafIndex');
+var componentHelper = require('../../src/ComponentHelper');
 
 require('../../src/components/networked');
 
@@ -61,8 +62,6 @@ suite('networked_WithParent', function() {
   suite('syncAll', function() {
 
     test('broadcasts uncompressed data with parent', sinon.test(function() {
-      this.stub(networked, 'createNetworkId').returns('network1');
-      this.stub(parentNetworked, 'createNetworkId').returns('parentId');
       this.stub(naf.connection, 'broadcastDataGuaranteed');
       var expected = {
         0: 0,
@@ -70,13 +69,16 @@ suite('networked_WithParent', function() {
         owner: 'owner1',
         parent: 'parentId',
         template: 't1',
+        physics: null,
+        takeover: false,
         components: {
           position: { x: 1, y: 2, z: 3 },
           rotation: { x: 4, y: 3, z: 2 }
         }
       };
-
+      var networkIdStub = this.stub(naf.utils, 'createNetworkId').returns('parentId');
       parentNetworked.init();
+      networkIdStub.returns('network1');
       networked.init();
       document.body.dispatchEvent(new Event('loggedIn'));
       networked.syncAll();

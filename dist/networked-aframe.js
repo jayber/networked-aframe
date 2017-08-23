@@ -54,9 +54,11 @@
 	__webpack_require__(47);
 
 	// Network components
-	__webpack_require__(57);
-	__webpack_require__(60);
-	__webpack_require__(64);
+	__webpack_require__(58);
+	__webpack_require__(62);
+	__webpack_require__(66);
+	__webpack_require__(67);
+	__webpack_require__(68);
 
 /***/ }),
 /* 1 */
@@ -226,6 +228,19 @@
 	}
 
 	function fetchTemplateFromXHR(src, type) {
+	  if (src.indexOf('data:') === 0) {
+	    // Handle inline data URI.
+	    var split = src.split(',', 2);
+	    var inlineData = src.substring(split[1]);
+	    var uriType = split[0].substring(5);
+	    var isBase64 = uriType.endsWith(';base64');
+	    if (isBase64) {
+	      uriType = uriType.substring(0, uriType.length - 7);
+	    }
+	    var blob = new Blob(isBase64 ? window.atob(inlineData) : decodeURIComponent(inlineData), uriType);
+	    src = URL.createObjectURL(blob);
+	  }
+
 	  return new Promise(function (resolve) {
 	    var request;
 	    request = new XMLHttpRequest();
@@ -1780,10 +1795,11 @@
 
 	var options = __webpack_require__(48);
 	var util = __webpack_require__(49);
-	var NafLogger = __webpack_require__(50);
-	var Schemas = __webpack_require__(51);
-	var NetworkEntities = __webpack_require__(52);
-	var NetworkConnection = __webpack_require__(54);
+	var physics = __webpack_require__(50);
+	var NafLogger = __webpack_require__(51);
+	var Schemas = __webpack_require__(52);
+	var NetworkEntities = __webpack_require__(53);
+	var NetworkConnection = __webpack_require__(55);
 
 	var naf = {};
 	naf.app = '';
@@ -1791,6 +1807,7 @@
 	naf.clientId = '';
 	naf.options = options;
 	naf.utils = util;
+	naf.physics = physics;
 	naf.log = new NafLogger();
 	naf.schemas = new Schemas();
 	naf.version = "0.2.0";
@@ -1812,7 +1829,9 @@
 	  debug: false,
 	  updateRate: 15, // How often network components call `sync`
 	  compressSyncPackets: false, // compress network component sync packet json
-	  useLerp: true // when networked entities are created the aframe-lerp-component is attched to the root
+	  useLerp: true, // when networked entities are created the aframe-lerp-component is attached to the root
+	  useShare: true, // whether for remote entities, we use networked-share (instead of networked-remote)
+	  collisionOwnership: true // whether for networked-share, we take ownership when needed upon physics collision
 	};
 
 	module.exports = options;
@@ -1843,8 +1862,34 @@
 	  var components = entity.components;
 	  if (components.hasOwnProperty('networked-remote')) {
 	    return entity.components['networked-remote'].data.owner;
+	  } else if (components.hasOwnProperty('networked-share')) {
+	    return entity.components['networked-share'].data.owner;
 	  } else if (components.hasOwnProperty('networked')) {
 	    return entity.components['networked'].owner;
+	  }
+	  return null;
+	};
+
+	module.exports.getNetworkId = function (entity) {
+	  var components = entity.components;
+	  if (components.hasOwnProperty('networked-remote')) {
+	    return entity.components['networked-remote'].data.networkId;
+	  } else if (components.hasOwnProperty('networked-share')) {
+	    return entity.components['networked'].data.networkId;
+	  } else if (components.hasOwnProperty('networked')) {
+	    return entity.components['networked'].networkId;
+	  }
+	  return null;
+	};
+
+	module.exports.getNetworkType = function (entity) {
+	  var components = entity.components;
+	  if (components.hasOwnProperty('networked-remote')) {
+	    return "networked-remote";
+	  } else if (components.hasOwnProperty('networked-share')) {
+	    return "networked-share";
+	  } else if (components.hasOwnProperty('networked')) {
+	    return "networked";
 	  }
 	  return null;
 	};
@@ -1853,10 +1898,203 @@
 	  return Date.now();
 	};
 
-	module.exports.delimiter = '|||';
+	module.exports.delimiter = '---';
+
+	module.exports.childSchemaToKey = function (schema) {
+	  return (schema.selector || '') + module.exports.delimiter + schema.component + module.exports.delimiter + (schema.property || '');
+	};
+
+	module.exports.keyToChildSchema = function (key) {
+	  var splitKey = key.split(module.exports.delimiter, 3);
+	  return { selector: splitKey[0] || undefined, component: splitKey[1], property: splitKey[2] || undefined };
+	};
+
+	module.exports.isChildSchemaKey = function (key) {
+	  return key.indexOf(module.exports.delimiter) != -1;
+	};
+
+	module.exports.childSchemaEqual = function (a, b) {
+	  return a.selector == b.selector && a.component == b.component && a.property == b.property;
+	};
+
+	module.exports.monkeyPatchEntityFromTemplateChild = function (entity, templateChild, callback) {
+	  templateChild.addEventListener('templaterendered', function () {
+	    var cloned = templateChild.firstChild;
+	    // mirror the attributes
+	    Array.prototype.slice.call(cloned.attributes || []).forEach(function (attr) {
+	      entity.setAttribute(attr.nodeName, attr.nodeValue);
+	    });
+	    // take the children
+	    for (var child = cloned.firstChild; child; child = cloned.firstChild) {
+	      cloned.removeChild(child);
+	      entity.appendChild(child);
+	    }
+
+	    cloned.pause && cloned.pause();
+	    templateChild.pause();
+	    setTimeout(function () {
+	      try {
+	        templateChild.removeChild(cloned);
+	      } catch (e) {}
+	      try {
+	        entity.removeChild(templateChild);
+	      } catch (e) {}
+	      if (callback) {
+	        callback();
+	      }
+	    });
+	  });
+	};
 
 /***/ }),
 /* 50 */
+/***/ (function(module, exports) {
+
+	"use strict";
+
+	module.exports.getPhysicsData = function (entity) {
+	  if (entity.body) {
+
+	    var constraints = NAF.physics.getConstraints(entity);
+
+	    var physicsData = {
+	      type: entity.body.type,
+	      hasConstraint: constraints != null && constraints.length > 0,
+	      position: entity.body.position,
+	      quaternion: entity.body.quaternion,
+	      velocity: entity.body.velocity,
+	      angularVelocity: entity.body.angularVelocity,
+	      timestamp: NAF.utils.now()
+	    };
+
+	    return physicsData;
+	  } else {
+	    return null;
+	  }
+	};
+
+	module.exports.getConstraints = function (entity) {
+	  // Check if our Body is in a constraint
+	  // So that others can react to that special case
+
+	  if (!entity.sceneEl.systems.physics || !entity.body) {
+	    return null;
+	  }
+
+	  var constraints = entity.sceneEl.systems.physics.world.constraints;
+	  var myConstraints = [];
+
+	  if (constraints && constraints.length > 0) {
+	    for (var i = 0; i < constraints.length; i++) {
+	      if (constraints[i].bodyA.id == entity.body.id || constraints[i].bodyB.id == entity.body.id) {
+	        myConstraints.push(constraints[i]);
+	      }
+	    }
+	  } else {
+	    return null;
+	  }
+
+	  return myConstraints;
+	};
+
+	module.exports.updatePhysics = function (entity, newBodyData) {
+	  var body = NAF.physics.getEntityBody(entity);
+
+	  if (body && newBodyData != "") {
+	    body.position.copy(newBodyData.position);
+	    body.quaternion.copy(newBodyData.quaternion);
+	    body.velocity.copy(newBodyData.velocity);
+	    body.angularVelocity.copy(newBodyData.angularVelocity);
+	  }
+	};
+
+	module.exports.isStrongerThan = function (entity, otherBody) {
+	  // A way to decide which element is stronger
+	  // when a collision happens
+	  // so that we can decide which one inherits ownership
+	  if (entity.body && otherBody) {
+	    // TODO: What if they are equal?
+	    return NAF.physics.calculatePhysicsStrength(entity.body) > NAF.physics.calculatePhysicsStrength(otherBody);
+	  } else {
+	    return false;
+	  }
+	};
+
+	module.exports.calculatePhysicsStrength = function (body) {
+	  var speed = Math.abs(body.velocity.x) + Math.abs(body.velocity.y) + Math.abs(body.velocity.z);
+	  var rotationalSpeed = Math.abs(body.angularVelocity.x) + Math.abs(body.angularVelocity.y) + Math.abs(body.angularVelocity.z);
+
+	  return 2 * speed + rotationalSpeed;
+	};
+
+	module.exports.attachPhysicsLerp = function (entity, physicsData) {
+	  if (entity && physicsData) {
+	    AFRAME.utils.entity.setComponentProperty(entity, "physics-lerp", {
+	      targetPosition: physicsData.position,
+	      targetQuaternion: physicsData.quaternion,
+	      targetVelocity: physicsData.velocity,
+	      targetAngularVelocity: physicsData.angularVelocity,
+	      time: 1000 / NAF.options.updateRate
+	    });
+	  }
+	};
+
+	module.exports.detachPhysicsLerp = function (entity) {
+	  if (entity && entity.components['physics-lerp']) {
+	    entity.removeAttribute("physics-lerp");
+	  }
+	};
+
+	module.exports.sleep = function (entity) {
+	  if (entity) {
+	    var body = NAF.physics.getEntityBody(entity);
+
+	    if (body) {
+	      body.sleep();
+	    }
+	  }
+	};
+
+	module.exports.wakeUp = function (entity) {
+	  if (entity) {
+	    var body = NAF.physics.getEntityBody(entity);
+
+	    if (body) {
+	      if (body.sleepState == CANNON.Body.SLEEPING) {
+	        body.wakeUp();
+	      }
+	    }
+	  }
+	};
+
+	module.exports.getEntityBody = function (entity) {
+	  // This is necessary because of networked-aframes schema system and networked-remote
+	  if (entity.body) {
+	    return entity.body;
+	  } else {
+	    var childBody = entity.querySelector("[dynamic-body], [static-body]");
+
+	    if (childBody && childBody.body) {
+	      return childBody.body;
+	    }
+	  }
+
+	  return null;
+	};
+
+	module.exports.collisionEvent = "collide";
+
+	module.exports.getDataFromCollision = function (collisionEvent) {
+	  if (collisionEvent) {
+	    return {
+	      body: collisionEvent.detail.body,
+	      el: collisionEvent.detail.body.el
+	    };
+	  }
+	};
+
+/***/ }),
+/* 51 */
 /***/ (function(module, exports) {
 
 	"use strict";
@@ -1897,7 +2135,7 @@
 	module.exports = NafLogger;
 
 /***/ }),
-/* 51 */
+/* 52 */
 /***/ (function(module, exports) {
 
 	'use strict';
@@ -1960,7 +2198,7 @@
 	module.exports = Schemas;
 
 /***/ }),
-/* 52 */
+/* 53 */
 /***/ (function(module, exports, __webpack_require__) {
 
 	'use strict';
@@ -1969,7 +2207,7 @@
 
 	function _classCallCheck(instance, Constructor) { if (!(instance instanceof Constructor)) { throw new TypeError("Cannot call a class as a function"); } }
 
-	var ChildEntityCache = __webpack_require__(53);
+	var ChildEntityCache = __webpack_require__(54);
 
 	var NetworkEntities = function () {
 	  function NetworkEntities() {
@@ -1992,7 +2230,38 @@
 	      var entity = document.createElement('a-entity');
 	      entity.setAttribute('id', 'naf-' + entityData.networkId);
 
+	      var script;
 	      var template = entityData.template;
+	      if (template.substring(0, 5) === 'data:') {
+	        // data URI
+	        var split = template.split(',', 2);
+	        var inlineData = split[1];
+	        var uriType = split[0].substring(5);
+	        var isBase64 = uriType.endsWith(';base64');
+	        if (isBase64) {
+	          uriType = uriType.substring(0, uriType.length - 7);
+	        }
+	        inlineData = isBase64 ? window.atob(inlineData) : decodeURIComponent(inlineData);
+
+	        // blob URLs do not survive template load, so make script element.
+	        script = document.createElement('script');
+	        var id = 'tpl-' + entityData.networkId;
+	        script.setAttribute('id', id);
+	        script.setAttribute('type', uriType);
+	        script.innerHTML = inlineData;
+	        document.body.appendChild(script);
+
+	        entityData.template = template = '#' + id;
+	        //console.log('createRemoteEntity: data URI => template ' + template);
+	      }
+
+	      if (template) {
+	        entity.addEventListener('loaded', function () {
+	          var templateChild = entity.firstChild;
+	          NAF.utils.monkeyPatchEntityFromTemplateChild(entity, templateChild);
+	        });
+	      }
+
 	      var components = NAF.schemas.getComponents(template);
 	      this.initPosition(entity, entityData.components);
 	      this.initRotation(entity, entityData.components);
@@ -2028,7 +2297,14 @@
 	        networkId: entityData.networkId,
 	        components: components
 	      };
-	      entity.setAttribute('networked-remote', networkData);
+	      if (NAF.options.useShare) {
+	        networkData.showLocalTemplate = entityData.showTemplate;
+	        networkData.showRemoteTemplate = entityData.showTemplate;
+	        entity.setAttribute('networked-share', networkData);
+	      } else {
+	        networkData.showTemplate = entityData.showTemplate;
+	        entity.setAttribute('networked-remote', networkData);
+	      }
 	      entity.firstUpdateData = entityData;
 	    }
 	  }, {
@@ -2152,7 +2428,7 @@
 	module.exports = NetworkEntities;
 
 /***/ }),
-/* 53 */
+/* 54 */
 /***/ (function(module, exports) {
 
 	"use strict";
@@ -2202,7 +2478,7 @@
 	module.exports = ChildEntityCache;
 
 /***/ }),
-/* 54 */
+/* 55 */
 /***/ (function(module, exports, __webpack_require__) {
 
 	'use strict';
@@ -2211,8 +2487,7 @@
 
 	function _classCallCheck(instance, Constructor) { if (!(instance instanceof Constructor)) { throw new TypeError("Cannot call a class as a function"); } }
 
-	var log = __webpack_require__(50);
-	var NetworkInterface = __webpack_require__(55);
+	var NetworkInterface = __webpack_require__(56);
 
 	var NetworkConnection = function () {
 	  function NetworkConnection(networkEntities) {
@@ -2226,6 +2501,10 @@
 
 	    this.loggedIn = false;
 	    this.onLoggedInEvent = new Event('loggedIn');
+	    this.onPeerConnectedEvent = new Event('clientConnected');
+	    this.onPeerDisconnectedEvent = new Event('clientDisconnected');
+	    this.onDCOpenEvent = new Event('dataChannelOpened');
+	    this.onDCCloseEvent = new Event('dataChannelClosed');
 	  }
 
 	  _createClass(NetworkConnection, [{
@@ -2244,8 +2523,6 @@
 	  }, {
 	    key: 'connect',
 	    value: function connect(appId, roomId) {
-	      var _this = this;
-
 	      var enableAudio = arguments.length > 2 && arguments[2] !== undefined ? arguments[2] : false;
 
 	      NAF.app = appId;
@@ -2256,33 +2533,12 @@
 	        video: false,
 	        datachannel: true
 	      };
-
-	      var reconnector = function reconnector(source) {
-	        return function (id) {
-	          _this.serverLog(id, 'closed: ' + source);
-	        };
-	      };
-
 	      this.network.setStreamOptions(streamOptions);
-	      this.network.setDatachannelListeners(this.dcOpenListener.bind(this), this.dcCloseListener(reconnector("data")).bind(this), this.receiveDataChannelMessage.bind(this));
-	      this.network.setCloseListeners(reconnector("socket"), reconnector("peer"), reconnector("stream"));
+	      this.network.setDatachannelListeners(this.dcOpenListener.bind(this), this.dcCloseListener.bind(this), this.receiveDataChannelMessage.bind(this));
 	      this.network.setLoginListeners(this.loginSuccess.bind(this), this.loginFailure.bind(this));
 	      this.network.setRoomOccupantListener(this.occupantsReceived.bind(this));
 	      this.network.joinRoom(roomId);
 	      this.network.connect(appId);
-	    }
-	  }, {
-	    key: 'setApiFields',
-	    value: function setApiFields(fields) {
-	      if (this.network) {
-	        this.network.setApiFields(fields);
-	      }
-	    }
-	  }, {
-	    key: 'serverLog',
-	    value: function serverLog(id, message) {
-	      var name = readCookie('name');
-	      $.get("log", { user: name + '-' + id, message: message });
 	    }
 	  }, {
 	    key: 'onLogin',
@@ -2311,11 +2567,7 @@
 	  }, {
 	    key: 'occupantsReceived',
 	    value: function occupantsReceived(roomName, occupantList, isPrimary) {
-	      console.log("occupants received");
 	      this.checkForDisconnectingClients(this.connectList, occupantList);
-	      for (var p in occupantList) {
-	        this.onOccupantReceived(occupantList[p]);
-	      }
 	      this.connectList = occupantList;
 	      this.checkForConnectingClients(occupantList);
 	    }
@@ -2327,6 +2579,7 @@
 	        if (!clientFound) {
 	          NAF.log.write('Closing stream to ', id);
 	          this.network.closeStreamConnection(id);
+	          document.body.dispatchEvent(this.onPeerDisconnectedEvent);
 	        }
 	      }
 	    }
@@ -2338,6 +2591,7 @@
 	        if (startConnection) {
 	          NAF.log.write('Opening stream to ', id);
 	          this.network.startStreamConnection(id);
+	          document.body.dispatchEvent(this.onPeerConnectedEvent);
 	        }
 	      }
 	    }
@@ -2367,18 +2621,15 @@
 	      NAF.log.write('Opened data channel from ' + id);
 	      this.dcIsActive[id] = true;
 	      this.entities.completeSync();
+	      document.body.dispatchEvent(this.onDCOpenEvent);
 	    }
 	  }, {
 	    key: 'dcCloseListener',
-	    value: function dcCloseListener(reconnector) {
-	      var _this2 = this;
-
-	      return function (id) {
-	        NAF.log.write('Closed data channel from ' + id);
-	        _this2.dcIsActive[id] = false;
-	        _this2.entities.removeEntitiesFromUser(id);
-	        reconnector(id);
-	      };
+	    value: function dcCloseListener(id) {
+	      NAF.log.write('Closed data channel from ' + id);
+	      this.dcIsActive[id] = false;
+	      this.entities.removeEntitiesFromUser(id);
+	      document.body.dispatchEvent(this.onDCCloseEvent);
 	    }
 	  }, {
 	    key: 'dcIsConnectedTo',
@@ -2450,7 +2701,7 @@
 	module.exports = NetworkConnection;
 
 /***/ }),
-/* 55 */
+/* 56 */
 /***/ (function(module, exports, __webpack_require__) {
 
 	'use strict';
@@ -2463,7 +2714,7 @@
 
 	function _inherits(subClass, superClass) { if (typeof superClass !== "function" && superClass !== null) { throw new TypeError("Super expression must either be null or a function, not " + typeof superClass); } subClass.prototype = Object.create(superClass && superClass.prototype, { constructor: { value: subClass, enumerable: false, writable: true, configurable: true } }); if (superClass) Object.setPrototypeOf ? Object.setPrototypeOf(subClass, superClass) : subClass.__proto__ = superClass; }
 
-	var NafInterface = __webpack_require__(56);
+	var NafInterface = __webpack_require__(57);
 
 	var NetworkInterface = function (_NafInterface) {
 	  _inherits(NetworkInterface, _NafInterface);
@@ -2509,11 +2760,6 @@
 	      this.notImplemented();
 	    }
 	  }, {
-	    key: 'setCloseListeners',
-	    value: function setCloseListeners(socketDisconnectListener, peerClosedListener, streamCloseListener) {
-	      this.notImplemented();
-	    }
-	  }, {
 	    key: 'connect',
 	    value: function connect(appId) {
 	      this.notImplemented();
@@ -2548,11 +2794,6 @@
 	    value: function getConnectStatus(networkId) {
 	      this.notImplemented();
 	    }
-	  }, {
-	    key: 'setApiFields',
-	    value: function setApiFields(fields) {
-	      this.notImplemented();
-	    }
 	  }]);
 
 	  return NetworkInterface;
@@ -2565,7 +2806,7 @@
 	module.exports = NetworkInterface;
 
 /***/ }),
-/* 56 */
+/* 57 */
 /***/ (function(module, exports) {
 
 	'use strict';
@@ -2592,15 +2833,16 @@
 	module.exports = NafInterface;
 
 /***/ }),
-/* 57 */
+/* 58 */
 /***/ (function(module, exports, __webpack_require__) {
 
 	'use strict';
 
 	var naf = __webpack_require__(47);
 
-	var EasyRtcInterface = __webpack_require__(58);
-	var WebSocketEasyRtcInterface = __webpack_require__(59);
+	var EasyRtcInterface = __webpack_require__(59);
+	var WebSocketEasyRtcInterface = __webpack_require__(60);
+	var FirebaseWebRtcInterface = __webpack_require__(61);
 
 	AFRAME.registerComponent('networked-scene', {
 	  schema: {
@@ -2612,10 +2854,30 @@
 	    webrtc: { default: false },
 	    webrtcAudio: { default: false },
 
-	    debug: { default: false }
+	    firebase: { default: false },
+	    firebaseApiKey: { default: '' },
+	    firebaseAuthType: { default: 'none', oneOf: ['none', 'anonymous'] },
+	    firebaseAuthDomain: { default: '' },
+	    firebaseDatabaseURL: { default: '' },
+
+	    debug: { default: false },
+
+	    updateRate: { default: 0 },
+	    useLerp: { default: true },
+	    compressSyncPackets: { default: false },
+	    useShare: { default: true },
+	    collisionOwnership: { default: true }
 	  },
 
 	  init: function init() {
+	    if (this.data.updateRate) {
+	      naf.options.updateRate = this.data.updateRate;
+	    }
+	    naf.options.useLerp = this.data.useLerp;
+	    naf.options.compressSyncPackets = this.data.compressSyncPackets;
+	    naf.options.useShare = this.data.useShare;
+	    naf.options.collisionOwnership = this.data.collisionOwnership;
+
 	    this.el.addEventListener('connect', this.connect.bind(this));
 	    if (this.data.connectOnLoad) {
 	      this.el.emit('connect', null, false);
@@ -2646,9 +2908,19 @@
 	  setupNetworkInterface: function setupNetworkInterface() {
 	    var networkInterface;
 	    if (this.data.webrtc) {
-	      var easyRtcInterface = new EasyRtcInterface(easyrtc);
-	      easyRtcInterface.setSignalUrl(this.data.signalURL);
-	      networkInterface = easyRtcInterface;
+	      if (this.data.firebase) {
+	        var firebaseWebRtcInterface = new FirebaseWebRtcInterface(firebase, {
+	          authType: this.data.firebaseAuthType,
+	          apiKey: this.data.firebaseApiKey,
+	          authDomain: this.data.firebaseAuthDomain,
+	          databaseURL: this.data.firebaseDatabaseURL
+	        });
+	        networkInterface = firebaseWebRtcInterface;
+	      } else {
+	        var easyRtcInterface = new EasyRtcInterface(easyrtc);
+	        easyRtcInterface.setSignalUrl(this.data.signalURL);
+	        networkInterface = easyRtcInterface;
+	      }
 	    } else {
 	      var websocketInterface = new WebSocketEasyRtcInterface(easyrtc);
 	      websocketInterface.setSignalUrl(this.data.signalURL);
@@ -2670,7 +2942,7 @@
 	});
 
 /***/ }),
-/* 58 */
+/* 59 */
 /***/ (function(module, exports, __webpack_require__) {
 
 	'use strict';
@@ -2684,7 +2956,7 @@
 	function _inherits(subClass, superClass) { if (typeof superClass !== "function" && superClass !== null) { throw new TypeError("Super expression must either be null or a function, not " + typeof superClass); } subClass.prototype = Object.create(superClass && superClass.prototype, { constructor: { value: subClass, enumerable: false, writable: true, configurable: true } }); if (superClass) Object.setPrototypeOf ? Object.setPrototypeOf(subClass, superClass) : subClass.__proto__ = superClass; }
 
 	var naf = __webpack_require__(47);
-	var NetworkInterface = __webpack_require__(55);
+	var NetworkInterface = __webpack_require__(56);
 
 	var EasyRtcInterface = function (_NetworkInterface) {
 	  _inherits(EasyRtcInterface, _NetworkInterface);
@@ -2743,20 +3015,6 @@
 	      this.loginSuccess = successListener;
 	      this.loginFailure = failureListener;
 	    }
-	  }, {
-	    key: 'setCloseListeners',
-	    value: function setCloseListeners(socketDisconnectListener, peerClosedListener, streamCloseListener) {
-	      this.easyrtc.setDisconnectListener(socketDisconnectListener);
-	      this.easyrtc.setPeerClosedListener(peerClosedListener);
-	      this.streamCloseListener = streamCloseListener;
-	    }
-	  }, {
-	    key: 'setApiFields',
-	    value: function setApiFields(fields) {
-	      for (var el in fields) {
-	        this.easyrtc.setRoomApiField(naf.room, el, fields[el]);
-	      }
-	    }
 
 	    /*
 	     * Network actions
@@ -2792,7 +3050,6 @@
 	      this.easyrtc.setOnStreamClosed(function (easyrtcid) {
 	        var audioEl = document.getElementById('audio-' + easyrtcid);
 	        audioEl.parentNode.removeChild(audioEl);
-	        this.streamCloseListener(easyrtcid);
 	      });
 
 	      this.easyrtc.initMediaSource(function () {
@@ -2867,7 +3124,7 @@
 	module.exports = EasyRtcInterface;
 
 /***/ }),
-/* 59 */
+/* 60 */
 /***/ (function(module, exports, __webpack_require__) {
 
 	'use strict';
@@ -2881,7 +3138,7 @@
 	function _inherits(subClass, superClass) { if (typeof superClass !== "function" && superClass !== null) { throw new TypeError("Super expression must either be null or a function, not " + typeof superClass); } subClass.prototype = Object.create(superClass && superClass.prototype, { constructor: { value: subClass, enumerable: false, writable: true, configurable: true } }); if (superClass) Object.setPrototypeOf ? Object.setPrototypeOf(subClass, superClass) : subClass.__proto__ = superClass; }
 
 	var naf = __webpack_require__(47);
-	var NetworkInterface = __webpack_require__(55);
+	var NetworkInterface = __webpack_require__(56);
 
 	var WebSocketEasyRtcInterface = function (_NetworkInterface) {
 	  _inherits(WebSocketEasyRtcInterface, _NetworkInterface);
@@ -2997,18 +3254,617 @@
 	module.exports = WebSocketEasyRtcInterface;
 
 /***/ }),
-/* 60 */
+/* 61 */
+/***/ (function(module, exports, __webpack_require__) {
+
+	'use strict';
+
+	var _createClass = function () { function defineProperties(target, props) { for (var i = 0; i < props.length; i++) { var descriptor = props[i]; descriptor.enumerable = descriptor.enumerable || false; descriptor.configurable = true; if ("value" in descriptor) descriptor.writable = true; Object.defineProperty(target, descriptor.key, descriptor); } } return function (Constructor, protoProps, staticProps) { if (protoProps) defineProperties(Constructor.prototype, protoProps); if (staticProps) defineProperties(Constructor, staticProps); return Constructor; }; }();
+
+	function _classCallCheck(instance, Constructor) { if (!(instance instanceof Constructor)) { throw new TypeError("Cannot call a class as a function"); } }
+
+	function _possibleConstructorReturn(self, call) { if (!self) { throw new ReferenceError("this hasn't been initialised - super() hasn't been called"); } return call && (typeof call === "object" || typeof call === "function") ? call : self; }
+
+	function _inherits(subClass, superClass) { if (typeof superClass !== "function" && superClass !== null) { throw new TypeError("Super expression must either be null or a function, not " + typeof superClass); } subClass.prototype = Object.create(superClass && superClass.prototype, { constructor: { value: subClass, enumerable: false, writable: true, configurable: true } }); if (superClass) Object.setPrototypeOf ? Object.setPrototypeOf(subClass, superClass) : subClass.__proto__ = superClass; }
+
+	var naf = __webpack_require__(47);
+	var NetworkInterface = __webpack_require__(56);
+
+	var FirebaseWebRtcInterface = function (_NetworkInterface) {
+	  _inherits(FirebaseWebRtcInterface, _NetworkInterface);
+
+	  function FirebaseWebRtcInterface(firebase, params) {
+	    _classCallCheck(this, FirebaseWebRtcInterface);
+
+	    if (firebase === undefined) {
+	      throw new Error('Import https://www.gstatic.com/firebasejs/x.x.x/firebase.js');
+	    }
+
+	    var _this = _possibleConstructorReturn(this, (FirebaseWebRtcInterface.__proto__ || Object.getPrototypeOf(FirebaseWebRtcInterface)).call(this));
+
+	    _this.rootPath = 'networked-aframe';
+
+	    _this.id = null;
+	    _this.appId = null;
+	    _this.roomId = null;
+
+	    _this.peers = {}; // id -> WebRtcPeer
+	    _this.occupants = {}; // id -> joinTimestamp
+
+	    _this.firebase = firebase;
+
+	    _this.authType = params.authType;
+	    _this.apiKey = params.apiKey;
+	    _this.authDomain = params.authDomain;
+	    _this.databaseURL = params.databaseURL;
+	    return _this;
+	  }
+
+	  /*
+	   * Call before `connect`
+	   */
+
+	  _createClass(FirebaseWebRtcInterface, [{
+	    key: 'joinRoom',
+	    value: function joinRoom(roomId) {
+	      this.roomId = roomId;
+	    }
+	  }, {
+	    key: 'setRoomOccupantListener',
+	    value: function setRoomOccupantListener(occupantListener) {
+	      this.occupantListener = occupantListener;
+	    }
+
+	    // options: { datachannel: bool, audio: bool }
+
+	  }, {
+	    key: 'setStreamOptions',
+	    value: function setStreamOptions(options) {
+	      // TODO: support audio and video
+	      if (options.datachannel === false) console.warn('FirebaseWebRtcInterface.setStreamOptions: datachannel must be true.');
+	      if (options.audio === true) console.warn('FirebaseWebRtcInterface does not support audio yet.');
+	      if (options.video === true) console.warn('FirebaseWebRtcInterface does not support video yet.');
+	    }
+	  }, {
+	    key: 'setDatachannelListeners',
+	    value: function setDatachannelListeners(openListener, closedListener, messageListener) {
+	      this.openListener = openListener;
+	      this.closedListener = closedListener;
+	      this.messageListener = messageListener;
+	    }
+	  }, {
+	    key: 'setLoginListeners',
+	    value: function setLoginListeners(successListener, failureListener) {
+	      this.loginSuccess = successListener;
+	      this.loginFailure = failureListener;
+	    }
+
+	    /*
+	     * Network actions
+	     */
+
+	  }, {
+	    key: 'connect',
+	    value: function connect(appId) {
+	      var self = this;
+	      var firebase = this.firebase;
+
+	      this.appId = appId;
+
+	      this.initFirebase(function (id) {
+	        self.id = id;
+
+	        // Note: assuming that data transfer via firebase realtime database
+	        //       is reliable and in order
+	        // TODO: can race among peers? If so, fix
+
+	        self.getTimestamp(function (timestamp) {
+	          self.myRoomJoinTime = timestamp;
+
+	          var userRef = firebase.database().ref(self.getUserPath(self.id));
+	          userRef.set({ timestamp: timestamp, signal: '', data: '' });
+	          userRef.onDisconnect().remove();
+
+	          var roomRef = firebase.database().ref(self.getRoomPath());
+
+	          roomRef.on('child_added', function (data) {
+	            var remoteId = data.key;
+
+	            if (remoteId === self.id || remoteId === 'timestamp' || self.peers[remoteId] !== undefined) return;
+
+	            var remoteTimestamp = data.val().timestamp;
+
+	            var peer = new WebRtcPeer(self.id, remoteId,
+	            // send signal function
+	            function (data) {
+	              firebase.database().ref(self.getSignalPath(self.id)).set(data);
+	            });
+	            peer.setDatachannelListeners(self.openListener, self.closedListener, self.messageListener);
+
+	            self.peers[remoteId] = peer;
+	            self.occupants[remoteId] = remoteTimestamp;
+
+	            // received signal
+	            firebase.database().ref(self.getSignalPath(remoteId)).on('value', function (data) {
+	              var value = data.val();
+	              if (value === null || value === '') return;
+	              peer.handleSignal(value);
+	            });
+
+	            // received data
+	            firebase.database().ref(self.getDataPath(remoteId)).on('value', function (data) {
+	              var value = data.val();
+	              if (value === null || value === '' || value.to !== self.id) return;
+	              self.messageListener(remoteId, value.type, value.data);
+	            });
+
+	            // send offer from a peer who
+	            //   - later joined the room, or
+	            //   - has larger id if two peers joined the room at same time
+	            if (timestamp > remoteTimestamp || timestamp === remoteTimestamp && self.id > remoteId) peer.offer();
+
+	            self.occupantListener(self.roomId, self.occupants, false);
+	          });
+
+	          roomRef.on('child_removed', function (data) {
+	            var remoteId = data.key;
+
+	            if (remoteId === self.id || remoteId === 'timestamp' || self.peers[remoteId] === undefined) return;
+
+	            delete self.peers[remoteId];
+	            delete self.occupants[remoteId];
+
+	            self.occupantListener(self.roomId, self.occupants, false);
+	          });
+
+	          self.loginSuccess(self.id);
+	        });
+	      });
+	    }
+	  }, {
+	    key: 'shouldStartConnectionTo',
+	    value: function shouldStartConnectionTo(client) {
+	      return (this.myRoomJoinTime || 0) <= (client ? client.roomJoinTime : 0);
+	    }
+	  }, {
+	    key: 'startStreamConnection',
+	    value: function startStreamConnection(networkId) {
+	      // TODO: implement
+	      console.warn('FirebaseWebRtcInterface does not imlement startStreamConnectionMethod yet.');
+	    }
+	  }, {
+	    key: 'closeStreamConnection',
+	    value: function closeStreamConnection(networkId) {
+	      // TODO: implement
+	      console.warn('FirebaseWebRtcInterface does not imlement closeStreamConnectionMethod yet.');
+	    }
+	  }, {
+	    key: 'sendData',
+	    value: function sendData(networkId, dataType, data) {
+	      this.peers[networkId].send(dataType, data);
+	    }
+	  }, {
+	    key: 'sendDataGuaranteed',
+	    value: function sendDataGuaranteed(networkId, dataType, data) {
+	      if (data.takeover === undefined) {
+	        data.takeover = null;
+	      }
+	      this.firebase.database().ref(this.getDataPath(this.id)).set({
+	        to: networkId,
+	        type: dataType,
+	        data: data
+	      });
+	    }
+
+	    /*
+	     * Getters
+	     */
+
+	  }, {
+	    key: 'getRoomJoinTime',
+	    value: function getRoomJoinTime(clientId) {
+	      return this.occupants[clientId];
+	    }
+	  }, {
+	    key: 'getConnectStatus',
+	    value: function getConnectStatus(networkId) {
+	      var peer = this.peers[networkId];
+
+	      if (peer === undefined) return NetworkInterface.NOT_CONNECTED;
+
+	      switch (peer.getStatus()) {
+	        case WebRtcPeer.IS_CONNECTED:
+	          return NetworkInterface.IS_CONNECTED;
+
+	        case WebRtcPeer.CONNECTING:
+	          return NetworkInterface.CONNECTING;
+
+	        case WebRtcPeer.NOT_CONNECTED:
+	        default:
+	          return NetworkInterface.NOT_CONNECTED;
+	      }
+	    }
+
+	    /*
+	     * Privates
+	     */
+
+	  }, {
+	    key: 'initFirebase',
+	    value: function initFirebase(callback) {
+	      this.firebase.initializeApp({
+	        apiKey: this.apiKey,
+	        authDomain: this.authDomain,
+	        databaseURL: this.databaseURL
+	      });
+
+	      this.auth(this.authType, callback);
+	    }
+	  }, {
+	    key: 'auth',
+	    value: function auth(type, callback) {
+	      switch (type) {
+	        case 'none':
+	          this.authNone(callback);
+	          break;
+
+	        case 'anonymous':
+	          this.authAnonymous(callback);
+	          break;
+
+	        // TODO: support other auth type
+	        default:
+	          console.log('FirebaseWebRtcInterface.auth: Unknown authType ' + type);
+	          break;
+	      }
+	    }
+	  }, {
+	    key: 'authNone',
+	    value: function authNone(callback) {
+	      var self = this;
+
+	      // asynchronously invokes open listeners for the compatibility with other auth types.
+	      // TODO: generate not just random but also unique id
+	      requestAnimationFrame(function () {
+	        callback(self.randomString());
+	      });
+	    }
+	  }, {
+	    key: 'authAnonymous',
+	    value: function authAnonymous(callback) {
+	      var self = this;
+	      var firebase = this.firebase;
+
+	      firebase.auth().signInAnonymously().catch(function (error) {
+	        console.error('FirebaseWebRtcInterface.authAnonymous: ' + error);
+	        self.loginFailure(null, error);
+	      });
+
+	      firebase.auth().onAuthStateChanged(function (user) {
+	        if (user !== null) {
+	          callback(user.uid);
+	        }
+	      });
+	    }
+
+	    /*
+	     * realtime database layout
+	     *
+	     * /rootPath/appId/roomId/
+	     *   - /userId/
+	     *     - timestamp: joining the room timestamp
+	     *     - signal: used to send signal
+	     *     - data: used to send guaranteed data
+	     *   - /timestamp/: working path to get timestamp
+	     *     - userId: 
+	     */
+
+	  }, {
+	    key: 'getRootPath',
+	    value: function getRootPath() {
+	      return this.rootPath;
+	    }
+	  }, {
+	    key: 'getAppPath',
+	    value: function getAppPath() {
+	      return this.getRootPath() + '/' + this.appId;
+	    }
+	  }, {
+	    key: 'getRoomPath',
+	    value: function getRoomPath() {
+	      return this.getAppPath() + '/' + this.roomId;
+	    }
+	  }, {
+	    key: 'getUserPath',
+	    value: function getUserPath(id) {
+	      return this.getRoomPath() + '/' + id;
+	    }
+	  }, {
+	    key: 'getSignalPath',
+	    value: function getSignalPath(id) {
+	      return this.getUserPath(id) + '/signal';
+	    }
+	  }, {
+	    key: 'getDataPath',
+	    value: function getDataPath(id) {
+	      return this.getUserPath(id) + '/data';
+	    }
+	  }, {
+	    key: 'getTimestampGenerationPath',
+	    value: function getTimestampGenerationPath(id) {
+	      return this.getRoomPath() + '/timestamp/' + id;
+	    }
+	  }, {
+	    key: 'randomString',
+	    value: function randomString() {
+	      var stringLength = 16;
+	      var chars = 'ABCDEFGHIJKLMNOPQRSTUVWXTZabcdefghiklmnopqrstuvwxyz0123456789';
+	      var string = '';
+
+	      for (var i = 0; i < stringLength; i++) {
+	        var randomNumber = Math.floor(Math.random() * chars.length);
+	        string += chars.substring(randomNumber, randomNumber + 1);
+	      }
+
+	      return string;
+	    }
+	  }, {
+	    key: 'getTimestamp',
+	    value: function getTimestamp(callback) {
+	      var firebase = this.firebase;
+	      var ref = firebase.database().ref(this.getTimestampGenerationPath(this.id));
+	      ref.set(firebase.database.ServerValue.TIMESTAMP);
+	      ref.once('value', function (data) {
+	        var timestamp = data.val();
+	        ref.remove();
+	        callback(timestamp);
+	      });
+	      ref.onDisconnect().remove();
+	    }
+	  }]);
+
+	  return FirebaseWebRtcInterface;
+	}(NetworkInterface);
+
+	module.exports = FirebaseWebRtcInterface;
+
+	var WebRtcPeer = function () {
+	  function WebRtcPeer(localId, remoteId, sendSignalFunc) {
+	    _classCallCheck(this, WebRtcPeer);
+
+	    this.localId = localId;
+	    this.remoteId = remoteId;
+	    this.sendSignalFunc = sendSignalFunc;
+	    this.open = false;
+	    this.channelLabel = 'networked-aframe-channel';
+
+	    this.pc = this.createPeerConnection();
+	    this.channel = null;
+	  }
+
+	  _createClass(WebRtcPeer, [{
+	    key: 'setDatachannelListeners',
+	    value: function setDatachannelListeners(openListener, closedListener, messageListener) {
+	      this.openListener = openListener;
+	      this.closedListener = closedListener;
+	      this.messageListener = messageListener;
+	    }
+	  }, {
+	    key: 'offer',
+	    value: function offer() {
+	      var self = this;
+	      // reliable: false - UDP
+	      this.setupChannel(this.pc.createDataChannel(this.channelLabel, { reliable: false }));
+	      this.pc.createOffer(function (sdp) {
+	        self.handleSessionDescription(sdp);
+	      }, function (error) {
+	        console.error('WebRtcPeer.offer: ' + error);
+	      });
+	    }
+	  }, {
+	    key: 'handleSignal',
+	    value: function handleSignal(signal) {
+	      // ignores signal if it isn't for me
+	      if (this.localId !== signal.to || this.remoteId !== signal.from) return;
+
+	      switch (signal.type) {
+	        case 'offer':
+	          this.handleOffer(signal);
+	          break;
+
+	        case 'answer':
+	          this.handleAnswer(signal);
+	          break;
+
+	        case 'candidate':
+	          this.handleCandidate(signal);
+	          break;
+
+	        default:
+	          console.error('WebRtcPeer.handleSignal: Unknown signal type ' + signal.type);
+	          break;
+	      }
+	    }
+	  }, {
+	    key: 'send',
+	    value: function send(type, data) {
+	      // TODO: throw error?
+	      if (this.channel === null || this.channel.readyState !== 'open') return;
+
+	      this.channel.send(JSON.stringify({ type: type, data: data }));
+	    }
+	  }, {
+	    key: 'getStatus',
+	    value: function getStatus() {
+	      if (this.channel === null) return WebRtcPeer.NOT_CONNECTED;
+
+	      switch (this.channel.readyState) {
+	        case 'open':
+	          return WebRtcPeer.IS_CONNECTED;
+
+	        case 'connecting':
+	          return WebRtcPeer.CONNECTING;
+
+	        case 'closing':
+	        case 'closed':
+	        default:
+	          return WebRtcPeer.NOT_CONNECTED;
+	      }
+	    }
+
+	    /*
+	     * Privates
+	     */
+
+	  }, {
+	    key: 'createPeerConnection',
+	    value: function createPeerConnection() {
+	      var self = this;
+	      var RTCPeerConnection = window.RTCPeerConnection || window.webkitRTCPeerConnection || window.mozRTCPeerConnection || window.msRTCPeerConnection;
+
+	      if (RTCPeerConnection === undefined) {
+	        throw new Error('WebRtcPeer.createPeerConnection: This browser does not seem to support WebRTC.');
+	      }
+
+	      var pc = new RTCPeerConnection({ 'iceServers': WebRtcPeer.ICE_SERVERS });
+
+	      pc.onicecandidate = function (event) {
+	        if (event.candidate) {
+	          self.sendSignalFunc({
+	            from: self.localId,
+	            to: self.remoteId,
+	            type: 'candidate',
+	            sdpMLineIndex: event.candidate.sdpMLineIndex,
+	            candidate: event.candidate.candidate
+	          });
+	        }
+	      };
+
+	      // Note: seems like channel.onclose hander is unreliable on some platforms,
+	      //       so also tries to detect disconnection here.
+	      pc.oniceconnectionstatechange = function () {
+	        if (self.open && pc.iceConnectionState === 'disconnected') {
+	          self.open = false;
+	        }
+	      };
+
+	      return pc;
+	    }
+	  }, {
+	    key: 'setupChannel',
+	    value: function setupChannel(channel) {
+	      var self = this;
+
+	      this.channel = channel;
+
+	      // received data from a remote peer
+	      this.channel.onmessage = function (event) {
+	        var data = JSON.parse(event.data);
+	        self.messageListener(self.remoteId, data.type, data.data);
+	      };
+
+	      // connected with a remote peer
+	      this.channel.onopen = function (event) {
+	        self.open = true;
+	        self.openListener(self.remoteId);
+	      };
+
+	      // disconnected with a remote peer
+	      this.channel.onclose = function (event) {
+	        if (!self.open) return;
+	        self.open = false;
+	        self.closedListener(self.remoteId);
+	      };
+
+	      // error occurred with a remote peer
+	      this.channel.onerror = function (error) {
+	        console.error('WebRtcPeer.channel.onerror: ' + error);
+	      };
+	    }
+	  }, {
+	    key: 'handleOffer',
+	    value: function handleOffer(message) {
+	      var self = this;
+
+	      this.pc.ondatachannel = function (event) {
+	        self.setupChannel(event.channel);
+	      };
+
+	      this.setRemoteDescription(message);
+
+	      this.pc.createAnswer(function (sdp) {
+	        self.handleSessionDescription(sdp);
+	      }, function (error) {
+	        console.error('WebRtcPeer.handleOffer: ' + error);
+	      });
+	    }
+	  }, {
+	    key: 'handleAnswer',
+	    value: function handleAnswer(message) {
+	      this.setRemoteDescription(message);
+	    }
+	  }, {
+	    key: 'handleCandidate',
+	    value: function handleCandidate(message) {
+	      var self = this;
+	      var RTCIceCandidate = window.RTCIceCandidate || window.webkitRTCIceCandidate || window.mozRTCIceCandidate;
+
+	      this.pc.addIceCandidate(new RTCIceCandidate(message), function () {}, function (error) {
+	        console.error('WebRtcPeer.handleCandidate: ' + error);
+	      });
+	    }
+	  }, {
+	    key: 'handleSessionDescription',
+	    value: function handleSessionDescription(sdp) {
+	      var self = this;
+
+	      this.pc.setLocalDescription(sdp, function () {}, function (error) {
+	        console.error('WebRtcPeer.handleSessionDescription: ' + error);
+	      });
+
+	      this.sendSignalFunc({
+	        from: this.localId,
+	        to: this.remoteId,
+	        type: sdp.type,
+	        sdp: sdp.sdp
+	      });
+	    }
+	  }, {
+	    key: 'setRemoteDescription',
+	    value: function setRemoteDescription(message) {
+	      var self = this;
+	      var RTCSessionDescription = window.RTCSessionDescription || window.webkitRTCSessionDescription || window.mozRTCSessionDescription || window.msRTCSessionDescription;
+
+	      this.pc.setRemoteDescription(new RTCSessionDescription(message), function () {}, function (error) {
+	        console.error('WebRtcPeer.setRemoteDescription: ' + error);
+	      });
+	    }
+	  }]);
+
+	  return WebRtcPeer;
+	}();
+
+	WebRtcPeer.IS_CONNECTED = 'IS_CONNECTED';
+	WebRtcPeer.CONNECTING = 'CONNECTING';
+	WebRtcPeer.NOT_CONNECTED = 'NOT_CONNECTED';
+
+	WebRtcPeer.ICE_SERVERS = [{ urls: 'stun:stun.l.google.com:19302' }, { urls: 'stun:stun1.l.google.com:19302' }, { urls: 'stun:stun2.l.google.com:19302' }, { urls: 'stun:stun3.l.google.com:19302' }, { urls: 'stun:stun4.l.google.com:19302' }];
+
+/***/ }),
+/* 62 */
 /***/ (function(module, exports, __webpack_require__) {
 
 	'use strict';
 
 	var naf = __webpack_require__(47);
-	var deepEqual = __webpack_require__(61);
+	var deepEqual = __webpack_require__(63);
 
 	AFRAME.registerComponent('networked', {
 	  schema: {
 	    template: { default: '' },
-	    showLocalTemplate: { default: true }
+	    showLocalTemplate: { default: true },
+	    showRemoteTemplate: { default: true },
+	    physics: { default: false }
 	  },
 
 	  init: function init() {
@@ -3063,12 +3919,45 @@
 	      this.el.removeChild(this.templateEl);
 	    }
 
-	    var templateChild = document.createElement('a-entity');
-	    templateChild.setAttribute('template', 'src:' + template);
-	    templateChild.setAttribute('visible', show);
+	    if (!template) {
+	      return;
+	    }
 
-	    this.el.appendChild(templateChild);
-	    this.templateEl = templateChild;
+	    if (show) {
+	      var templateChild = document.createElement('a-entity');
+	      templateChild.setAttribute('template', 'src:' + template);
+	      //templateChild.setAttribute('visible', show);
+
+	      var self = this;
+	      var el = this.el;
+	      templateChild.addEventListener('templaterendered', function () {
+	        var cloned = templateChild.firstChild;
+	        // mirror the attributes
+	        Array.prototype.slice.call(cloned.attributes || []).forEach(function (attr) {
+	          el.setAttribute(attr.nodeName, attr.nodeValue);
+	        });
+	        // take the children
+	        for (var child = cloned.firstChild; child; child = cloned.firstChild) {
+	          cloned.removeChild(child);
+	          el.appendChild(child);
+	        }
+
+	        cloned.pause();
+	        templateChild.pause();
+	        setTimeout(function () {
+	          try {
+	            templateChild.removeChild(cloned);
+	          } catch (e) {}
+	          try {
+	            el.removeChild(self.templateEl);
+	          } catch (e) {}
+	          delete self.templateEl;
+	        });
+	      });
+
+	      this.el.appendChild(templateChild);
+	      this.templateEl = templateChild;
+	    }
 	  },
 
 	  play: function play() {
@@ -3140,16 +4029,16 @@
 	        if (elComponents.hasOwnProperty(element)) {
 	          var name = element;
 	          var elComponent = elComponents[name];
-	          compsWithData[name] = elComponent.getData();
+	          compsWithData[name] = AFRAME.utils.clone(elComponent.data);
 	        }
 	      } else {
-	        var childKey = this.childSchemaToKey(element);
-	        var child = this.el.querySelector(element.selector);
+	        var childKey = naf.utils.childSchemaToKey(element);
+	        var child = element.selector ? this.el.querySelector(element.selector) : this.el;
 	        if (child) {
 	          var comp = child.components[element.component];
 	          if (comp) {
-	            var data = comp.getData();
-	            compsWithData[childKey] = data;
+	            var data = element.property ? comp.data[element.property] : comp.data;
+	            compsWithData[childKey] = AFRAME.utils.clone(data);
 	          } else {
 	            naf.log.write('Could not find component ' + element.component + ' on child ', child, child.components);
 	          }
@@ -3177,19 +4066,23 @@
 	          continue;
 	        }
 	        compKey = schema;
-	        newCompData = newComps[schema].getData();
+	        newCompData = newComps[schema].data;
 	      } else {
 	        // is child component
 	        var selector = schema.selector;
 	        var compName = schema.component;
+	        var propName = schema.property;
 
-	        var childEl = this.el.querySelector(selector);
+	        var childEl = selector ? this.el.querySelector(selector) : this.el;
 	        var hasComponent = childEl && childEl.components.hasOwnProperty(compName);
 	        if (!hasComponent) {
 	          continue;
 	        }
-	        compKey = this.childSchemaToKey(schema);
-	        newCompData = childEl.components[compName].getData();
+	        compKey = naf.utils.childSchemaToKey(schema);
+	        newCompData = childEl.components[compName].data;
+	        if (propName) {
+	          newCompData = newCompData[propName];
+	        }
 	      }
 
 	      var compIsCached = this.cachedData.hasOwnProperty(compKey);
@@ -3212,9 +4105,15 @@
 	      networkId: this.networkId,
 	      owner: this.owner,
 	      template: this.data.template,
+	      showTemplate: this.data.showRemoteTemplate,
 	      parent: this.getParentId(),
 	      components: components
 	    };
+
+	    if (this.data.physics) {
+	      data['physics'] = NAF.physics.getPhysicsData(this.el);
+	    }
+
 	    return data;
 	  },
 
@@ -3230,7 +4129,6 @@
 	  getAllSyncedComponents: function getAllSyncedComponents() {
 	    return naf.schemas.getComponents(this.data.template);
 	  },
-
 
 	  /**
 	    Compressed packet structure:
@@ -3269,7 +4167,7 @@
 	      if (typeof components[i] === 'string') {
 	        name = components[i];
 	      } else {
-	        name = this.childSchemaToKey(components[i]);
+	        name = naf.utils.childSchemaToKey(components[i]);
 	      }
 	      if (syncComponents.hasOwnProperty(name)) {
 	        compMap[i] = syncComponents[name];
@@ -3287,17 +4185,11 @@
 	  remove: function remove() {
 	    var data = { networkId: this.networkId };
 	    naf.connection.broadcastData('r', data);
-	  },
-
-	  /* Static schema calls */
-
-	  childSchemaToKey: function childSchemaToKey(childSchema) {
-	    return childSchema.selector + naf.utils.delimiter + childSchema.component;
 	  }
 	});
 
 /***/ }),
-/* 61 */
+/* 63 */
 /***/ (function(module, exports, __webpack_require__) {
 
 	'use strict';
@@ -3305,8 +4197,8 @@
 	var _typeof = typeof Symbol === "function" && typeof Symbol.iterator === "symbol" ? function (obj) { return typeof obj; } : function (obj) { return obj && typeof Symbol === "function" && obj.constructor === Symbol && obj !== Symbol.prototype ? "symbol" : typeof obj; };
 
 	var pSlice = Array.prototype.slice;
-	var objectKeys = __webpack_require__(62);
-	var isArguments = __webpack_require__(63);
+	var objectKeys = __webpack_require__(64);
+	var isArguments = __webpack_require__(65);
 
 	var deepEqual = module.exports = function (actual, expected, opts) {
 	  if (!opts) opts = {};
@@ -3397,7 +4289,7 @@
 	}
 
 /***/ }),
-/* 62 */
+/* 64 */
 /***/ (function(module, exports) {
 
 	'use strict';
@@ -3413,7 +4305,7 @@
 	}
 
 /***/ }),
-/* 63 */
+/* 65 */
 /***/ (function(module, exports) {
 
 	'use strict';
@@ -3437,7 +4329,7 @@
 	};
 
 /***/ }),
-/* 64 */
+/* 66 */
 /***/ (function(module, exports, __webpack_require__) {
 
 	'use strict';
@@ -3447,13 +4339,14 @@
 	AFRAME.registerComponent('networked-remote', {
 	  schema: {
 	    template: { default: '' },
+	    showTemplate: { default: true },
 	    networkId: { default: '' },
 	    owner: { default: '' },
 	    components: { default: ['position', 'rotation'] }
 	  },
 
 	  init: function init() {
-	    this.attachTemplate(this.data.template);
+	    this.attachTemplate(this.data.template, this.data.showTemplate);
 	    this.attachLerp();
 
 	    if (this.el.firstUpdateData) {
@@ -3461,10 +4354,12 @@
 	    }
 	  },
 
-	  attachTemplate: function attachTemplate(template) {
-	    var templateChild = document.createElement('a-entity');
-	    templateChild.setAttribute('template', 'src:' + template);
-	    this.el.appendChild(templateChild);
+	  attachTemplate: function attachTemplate(template, show) {
+	    if (show) {
+	      var templateChild = document.createElement('a-entity');
+	      templateChild.setAttribute('template', 'src:' + template);
+	      this.el.appendChild(templateChild);
+	    }
 	  },
 
 	  attachLerp: function attachLerp() {
@@ -3513,6 +4408,11 @@
 	    if (entityData[0] == 1) {
 	      entityData = this.decompressSyncData(entityData);
 	    }
+
+	    if (entityData.physics) {
+	      this.updatePhysics(entityData.physics);
+	    }
+
 	    this.updateComponents(entityData.components);
 	  },
 
@@ -3520,16 +4420,31 @@
 	    for (var key in components) {
 	      if (this.isSyncableComponent(key)) {
 	        var data = components[key];
-	        if (this.isChildSchemaKey(key)) {
-	          var schema = this.keyToChildSchema(key);
-	          var childEl = this.el.querySelector(schema.selector);
+	        if (naf.utils.isChildSchemaKey(key)) {
+	          var schema = naf.utils.keyToChildSchema(key);
+	          var childEl = schema.selector ? this.el.querySelector(schema.selector) : this.el;
 	          if (childEl) {
 	            // Is false when first called in init
-	            childEl.setAttribute(schema.component, data);
+	            if (schema.property) {
+	              childEl.setAttribute(schema.component, schema.property, data);
+	            } else {
+	              childEl.setAttribute(schema.component, data);
+	            }
 	          }
 	        } else {
 	          this.el.setAttribute(key, data);
 	        }
+	      }
+	    }
+	  },
+
+	  updatePhysics: function updatePhysics(physics) {
+	    if (physics) {
+	      if (NAF.options.useLerp) {
+	        NAF.physics.attachPhysicsLerp(this.el, physics);
+	      } else {
+	        NAF.physics.detachPhysicsLerp(this.el);
+	        NAF.physics.updatePhysics(this.el, physics);
 	      }
 	    }
 	  },
@@ -3573,7 +4488,7 @@
 	      if (typeof schemaComp === "string") {
 	        name = schemaComp;
 	      } else {
-	        name = this.childSchemaToKey(schemaComp);
+	        name = naf.utils.childSchemaToKey(schemaComp);
 	      }
 	      decompressed[name] = compressed[i];
 	    }
@@ -3581,8 +4496,8 @@
 	  },
 
 	  isSyncableComponent: function isSyncableComponent(key) {
-	    if (this.isChildSchemaKey(key)) {
-	      var schema = this.keyToChildSchema(key);
+	    if (naf.utils.isChildSchemaKey(key)) {
+	      var schema = naf.utils.keyToChildSchema(key);
 	      return this.hasThisChildSchema(schema);
 	    } else {
 	      return this.data.components.indexOf(key) != -1;
@@ -3593,35 +4508,739 @@
 	    var schemaComponents = this.data.components;
 	    for (var i in schemaComponents) {
 	      var localChildSchema = schemaComponents[i];
-	      if (this.childSchemaEqual(localChildSchema, schema)) {
+	      if (naf.utils.childSchemaEqual(localChildSchema, schema)) {
+	        return true;
+	      }
+	    }
+	    return false;
+	  }
+	});
+
+/***/ }),
+/* 67 */
+/***/ (function(module, exports, __webpack_require__) {
+
+	'use strict';
+
+	var naf = __webpack_require__(47);
+	var deepEqual = __webpack_require__(63);
+
+	AFRAME.registerComponent('networked-share', {
+	  schema: {
+	    template: { default: '' },
+	    showLocalTemplate: { default: true },
+	    showRemoteTemplate: { default: true },
+	    networkId: { default: '' },
+	    owner: { default: '' },
+	    takeOwnershipEvents: {
+	      type: "array",
+	      default: ["grabbed", "touched"]
+	    },
+	    removeOwnershipEvents: {
+	      type: "array",
+	      default: []
+	    },
+	    components: { default: ['position', 'rotation'] },
+	    physics: { default: false }
+	  },
+
+	  init: function init() {
+	    this.networkUpdateHandler = this.networkUpdateHandler.bind(this);
+	    this.syncDirty = this.syncDirty.bind(this);
+	    this.syncAll = this.syncAll.bind(this);
+	    this.takeOwnership = this.takeOwnership.bind(this);
+	    this.removeOwnership = this.removeOwnership.bind(this);
+	    this.handlePhysicsCollision = this.handlePhysicsCollision.bind(this);
+
+	    this.bindOwnershipEvents();
+	    this.bindRemoteEvents();
+
+	    this.cachedData = {};
+	    this.initNetworkId();
+	    this.initNetworkParent();
+	    this.registerEntity(this.networkId);
+	    this.attachAndShowTemplate(this.data.template, this.data.showLocalTemplate);
+	    this.checkLoggedIn();
+
+	    if (this.el.firstUpdateData) {
+	      this.firstUpdate();
+	    }
+
+	    this.takeover = false;
+	  },
+
+	  initNetworkId: function initNetworkId() {
+	    if (!this.data.networkId) {
+	      this.data.networkId = Math.random().toString(36).substring(2, 9);
+	    }
+	    this.networkId = this.data.networkId;
+	  },
+
+	  initNetworkOwner: function initNetworkOwner() {
+	    if (!this.data.owner) {
+	      // Careful - this means that we assert ownership by default!
+	      this.takeOwnership();
+	    }
+	  },
+
+	  initNetworkParent: function initNetworkParent() {
+	    var parentEl = this.el.parentElement;
+	    if (parentEl.hasOwnProperty('components') && parentEl.components.hasOwnProperty('networked-share')) {
+	      this.parent = parentEl;
+	    } else {
+	      this.parent = null;
+	    }
+	  },
+
+	  listenForLoggedIn: function listenForLoggedIn() {
+	    document.body.addEventListener('loggedIn', this.onLoggedIn.bind(this), false);
+	  },
+
+	  checkLoggedIn: function checkLoggedIn() {
+	    if (naf.clientId) {
+	      this.onLoggedIn();
+	    } else {
+	      this.listenForLoggedIn();
+	    }
+	  },
+
+	  onLoggedIn: function onLoggedIn() {
+	    this.initNetworkOwner();
+	    if (this.isMine()) {
+	      this.syncAll();
+	    }
+	  },
+
+	  registerEntity: function registerEntity(networkId) {
+	    naf.entities.registerLocalEntity(networkId, this.el);
+	    NAF.log.write('Networked-Share registered: ', networkId);
+	  },
+
+	  attachAndShowTemplate: function attachAndShowTemplate(template, show) {
+	    if (this.templateEl) {
+	      this.el.removeChild(this.templateEl);
+	    }
+
+	    if (!template) {
+	      return;
+	    }
+
+	    if (show) {
+	      var templateChild = document.createElement('a-entity');
+	      templateChild.setAttribute('template', 'src:' + template);
+	      //templateChild.setAttribute('visible', show);
+
+	      var self = this;
+	      NAF.utils.monkeyPatchEntityFromTemplateChild(this.el, templateChild, function () {
+	        delete self.templateEl;
+	      });
+
+	      this.templateEl = templateChild;
+	      this.el.appendChild(templateChild);
+	    }
+	  },
+
+	  firstUpdate: function firstUpdate() {
+	    var entityData = this.el.firstUpdateData;
+	    this.networkUpdate(entityData); // updates root element only
+	    this.waitForTemplateAndUpdateChildren();
+	  },
+
+	  waitForTemplateAndUpdateChildren: function waitForTemplateAndUpdateChildren() {
+	    var that = this;
+	    var callback = function callback() {
+	      var entityData = that.el.firstUpdateData;
+	      that.networkUpdate(entityData);
+	    };
+
+	    // wait for template to render (and monkey-patching to finish, so next tick), then callback
+
+	    if (this.templateEl) {
+	      this.templateEl.addEventListener('templaterendered', function () {
+	        setTimeout(callback);
+	      });
+	    } else {
+	      setTimeout(callback);
+	    }
+	  },
+
+	  update: function update() {
+	    if (this.data.physics) {
+	      this.el.addEventListener(NAF.physics.collisionEvent, this.handlePhysicsCollision);
+	    } else {
+	      this.el.removeEventListener(NAF.physics.collisionEvent, this.handlePhysicsCollision);
+	    }
+
+	    this.lastPhysicsUpdateTimestamp = null;
+	  },
+
+	  takeOwnership: function takeOwnership() {
+	    if (!this.isMine()) {
+	      this.unbindOwnerEvents();
+	      this.unbindRemoteEvents();
+
+	      this.data.owner = NAF.clientId;
+
+	      if (!this.data.physics) {
+	        this.detachLerp();
+	      } else {
+	        NAF.physics.detachPhysicsLerp(this.el);
+	        // WakeUp Element - We are not interpolating anymore
+	        NAF.physics.wakeUp(this.el);
+	      }
+
+	      this.el.emit("networked-ownership-taken");
+
+	      this.takeover = true;
+
+	      this.syncAll();
+
+	      this.takeover = false;
+
+	      this.bindOwnerEvents();
+	      this.bindRemoteEvents();
+
+	      NAF.log.write('Networked-Share: Taken ownership of ', this.el.id);
+	    }
+	  },
+
+	  removeOwnership: function removeOwnership() {
+	    // We should never really remove ownership of an element
+	    // until it falls into the "sleep"-State in the physics engine.
+	    // TODO: Sleep State handling
+	    if (this.isMine()) {
+	      this.unbindOwnerEvents();
+	      this.unbindRemoteEvents();
+
+	      this.data.owner = "";
+
+	      this.bindRemoteEvents();
+
+	      if (!this.data.physics) {
+	        // No need to attach physics lerp
+	        // the physics engine itself interpolates
+	        this.attachLerp();
+	      }
+
+	      this.el.emit("networked-ownership-removed");
+
+	      this.syncAll();
+
+	      NAF.log.write('Networked-Share: Removed ownership of ', this.el.id);
+	    }
+	  },
+
+	  updateOwnership: function updateOwnership(owner, takeover) {
+	    var ownerChanged = !(this.data.owner == owner);
+	    var ownerIsMe = NAF.clientId == owner;
+
+	    if (this.isMine() && !ownerIsMe && ownerChanged && takeover) {
+	      // Somebody has stolen my ownership :/ - accept it and get over it
+	      this.unbindOwnerEvents();
+	      this.unbindRemoteEvents();
+
+	      this.data.owner = owner;
+
+	      this.bindRemoteEvents();
+
+	      if (!this.data.physics) {
+	        // No need to attach physics lerp
+	        // the physics engine itself interpolates
+	        this.attachLerp();
+	      }
+
+	      this.el.emit("networked-ownership-lost");
+
+	      NAF.log.write('Networked-Share: Friendly takeover of: ' + this.el.id + ' by ', this.data.owner);
+	    } else if (!this.isMine() && ownerChanged) {
+	      // Just update the owner, it's not me.
+	      this.data.owner = owner;
+
+	      this.el.emit("networked-ownership-changed");
+	      NAF.log.write('Networked-Share: Updated owner of: ' + this.el.id + ' to ', this.data.owner);
+	    }
+	  },
+
+	  attachLerp: function attachLerp() {
+	    if (naf.options.useLerp) {
+	      this.el.setAttribute('lerp', '');
+	    }
+	  },
+
+	  detachLerp: function detachLerp() {
+	    if (naf.options.useLerp) {
+	      this.el.removeAttribute('lerp');
+	    }
+	  },
+
+	  play: function play() {},
+
+	  bindOwnershipEvents: function bindOwnershipEvents() {
+	    if (this.data.takeOwnershipEvents) {
+	      // Register Events when ownership should be taken
+	      for (var i = 0; i < this.data.takeOwnershipEvents.length; i++) {
+	        this.el.addEventListener(this.data.takeOwnershipEvents[i], this.takeOwnership);
+	      }
+	    }
+
+	    if (this.data.removeOwnershipEvents) {
+	      // Register Events when ownership should be removed
+	      for (var i = 0; i < this.data.removeOwnershipEvents.length; i++) {
+	        this.el.addEventListener(this.data.removeOwnershipEvents[i], this.removeOwnership);
+	      }
+	    }
+	  },
+
+	  bindRemoteEvents: function bindRemoteEvents() {
+	    this.el.addEventListener('networkUpdate', this.networkUpdateHandler);
+	  },
+
+	  bindOwnerEvents: function bindOwnerEvents() {
+	    this.el.addEventListener('sync', this.syncDirty);
+	    this.el.addEventListener('syncAll', this.syncAll);
+	  },
+
+	  pause: function pause() {},
+
+	  unbindOwnershipEvents: function unbindOwnershipEvents() {
+	    if (this.data.takeOwnershipEvents) {
+	      // Unbind Events when ownership should be taken
+	      for (var i = 0; i < this.data.takeOwnershipEvents.length; i++) {
+	        this.el.removeEventListener(this.data.takeOwnershipEvents[i], this.takeOwnership);
+	      }
+	    }
+
+	    if (this.data.removeOwnershipEvents) {
+	      // Unbind Events when ownership should be removed
+	      for (var i = 0; i < this.data.removeOwnershipEvents.length; i++) {
+	        this.el.removeEventListener(this.data.removeOwnershipEvents[i], this.removeOwnership);
+	      }
+	    }
+	  },
+
+	  unbindRemoteEvents: function unbindRemoteEvents() {
+	    this.el.removeEventListener('networkUpdate', this.networkUpdateHandler);
+	  },
+
+	  unbindOwnerEvents: function unbindOwnerEvents() {
+	    this.el.removeEventListener('sync', this.syncDirty);
+	    this.el.removeEventListener('syncAll', this.syncAll);
+	  },
+
+	  tick: function tick() {
+	    if (this.isMine() && this.needsToSync()) {
+	      this.syncDirty();
+	    }
+	  },
+
+	  // Will only succeed if object is created after connected
+	  isMine: function isMine() {
+	    return this.hasOwnProperty('data') && naf.connection.isMineAndConnected(this.data.owner);
+	  },
+
+	  syncAll: function syncAll() {
+	    this.updateNextSyncTime();
+	    var allSyncedComponents = this.getAllSyncedComponents();
+	    var components = this.getComponentsData(allSyncedComponents);
+	    var syncData = this.createSyncData(components);
+	    naf.connection.broadcastDataGuaranteed('u', syncData);
+	    // console.error('syncAll', syncData);
+	    this.updateCache(components);
+	  },
+
+	  syncDirty: function syncDirty() {
+	    this.updateNextSyncTime();
+	    var dirtyComps = this.getDirtyComponents();
+	    if (dirtyComps.length == 0 && !this.data.physics) {
+	      return;
+	    }
+	    var components = this.getComponentsData(dirtyComps);
+	    var syncData = this.createSyncData(components);
+	    if (naf.options.compressSyncPackets) {
+	      syncData = this.compressSyncData(syncData);
+	    }
+	    naf.connection.broadcastData('u', syncData);
+	    // console.log('syncDirty', syncData);
+	    this.updateCache(components);
+	  },
+
+	  needsToSync: function needsToSync() {
+	    return naf.utils.now() >= this.nextSyncTime;
+	  },
+
+	  updateNextSyncTime: function updateNextSyncTime() {
+	    this.nextSyncTime = naf.utils.now() + 1000 / naf.options.updateRate;
+	  },
+
+	  getComponentsData: function getComponentsData(schemaComponents) {
+	    var elComponents = this.el.components;
+	    var compsWithData = {};
+
+	    for (var i in schemaComponents) {
+	      var element = schemaComponents[i];
+
+	      if (typeof element === 'string') {
+	        if (elComponents.hasOwnProperty(element)) {
+	          var name = element;
+	          var elComponent = elComponents[name];
+	          compsWithData[name] = AFRAME.utils.clone(elComponent.data);
+	        }
+	      } else {
+	        var childKey = naf.utils.childSchemaToKey(element);
+	        var child = element.selector ? this.el.querySelector(element.selector) : this.el;
+	        if (child) {
+	          var comp = child.components[element.component];
+	          if (comp) {
+	            var data = element.property ? comp.data[element.property] : comp.data;
+	            compsWithData[childKey] = AFRAME.utils.clone(data);
+	          } else {
+	            naf.log.write('Could not find component ' + element.component + ' on child ', child, child.components);
+	          }
+	        }
+	      }
+	    }
+	    return compsWithData;
+	  },
+
+	  getDirtyComponents: function getDirtyComponents() {
+	    var newComps = this.el.components;
+	    var syncedComps = this.getAllSyncedComponents();
+	    var dirtyComps = [];
+
+	    for (var i in syncedComps) {
+	      var schema = syncedComps[i];
+	      var compKey;
+	      var newCompData;
+
+	      var isRootComponent = typeof schema === 'string';
+
+	      if (isRootComponent) {
+	        var hasComponent = newComps.hasOwnProperty(schema);
+	        if (!hasComponent) {
+	          continue;
+	        }
+	        compKey = schema;
+	        newCompData = newComps[schema].data;
+	      } else {
+	        // is child component
+	        var selector = schema.selector;
+	        var compName = schema.component;
+	        var propName = schema.property;
+
+	        var childEl = selector ? this.el.querySelector(selector) : this.el;
+	        var hasComponent = childEl && childEl.components.hasOwnProperty(compName);
+	        if (!hasComponent) {
+	          continue;
+	        }
+	        compKey = naf.utils.childSchemaToKey(schema);
+	        newCompData = childEl.components[compName].data;
+	        if (propName) {
+	          newCompData = newCompData[propName];
+	        }
+	      }
+
+	      var compIsCached = this.cachedData.hasOwnProperty(compKey);
+	      if (!compIsCached) {
+	        dirtyComps.push(schema);
+	        continue;
+	      }
+
+	      var oldCompData = this.cachedData[compKey];
+	      if (!deepEqual(oldCompData, newCompData)) {
+	        dirtyComps.push(schema);
+	      }
+	    }
+	    return dirtyComps;
+	  },
+
+	  createSyncData: function createSyncData(components) {
+	    var data = {
+	      0: 0, // 0 for not compressed
+	      networkId: this.networkId,
+	      owner: this.data.owner,
+	      template: this.data.template,
+	      showTemplate: this.data.showRemoteTemplate,
+	      parent: this.getParentId(),
+	      components: components,
+	      takeover: this.takeover
+	    };
+
+	    if (this.data.physics) {
+	      data['physics'] = NAF.physics.getPhysicsData(this.el);
+	    }
+
+	    return data;
+	  },
+
+	  getParentId: function getParentId() {
+	    this.initNetworkParent();
+	    if (this.parent == null) {
+	      return null;
+	    }
+	    var component = this.parent.components.networked;
+	    return component.networkId;
+	  },
+
+	  getAllSyncedComponents: function getAllSyncedComponents() {
+	    return this.data.components;
+	  },
+
+	  networkUpdateHandler: function networkUpdateHandler(data) {
+	    var entityData = data.detail.entityData;
+	    this.networkUpdate(entityData);
+	  },
+
+	  networkUpdate: function networkUpdate(entityData) {
+	    if (entityData[0] == 1) {
+	      entityData = this.decompressSyncData(entityData);
+	    }
+	    this.updateOwnership(entityData.owner, entityData.takeover);
+
+	    if (this.data.physics && entityData.physics) {
+	      this.updatePhysics(entityData.physics);
+	    }
+
+	    this.updateComponents(entityData.components);
+	  },
+
+	  updateComponents: function updateComponents(components) {
+	    for (var key in components) {
+	      if (this.isSyncableComponent(key)) {
+	        var data = components[key];
+	        if (naf.utils.isChildSchemaKey(key)) {
+	          var schema = naf.utils.keyToChildSchema(key);
+	          var childEl = schema.selector ? this.el.querySelector(schema.selector) : this.el;
+	          if (childEl) {
+	            // Is false when first called in init
+	            if (schema.property) {
+	              childEl.setAttribute(schema.component, schema.property, data);
+	            } else {
+	              childEl.setAttribute(schema.component, data);
+	            }
+	          }
+	        } else {
+	          this.el.setAttribute(key, data);
+	        }
+	      }
+	    }
+	  },
+
+	  updatePhysics: function updatePhysics(physics) {
+	    if (physics && !this.isMine()) {
+	      // Check if this physics state is NEWER than the last one we updated
+	      // Network-Packets don't always arrive in order as they have been sent
+	      if (!this.lastPhysicsUpdateTimestamp || physics.timestamp > this.lastPhysicsUpdateTimestamp) {
+	        // TODO: CHeck if constraint is shared
+	        // Don't sync when constraints are applied
+	        // The constraints are synced and we don't want the jitter
+	        if (!physics.hasConstraint || !NAF.options.useLerp) {
+	          NAF.physics.detachPhysicsLerp(this.el);
+	          // WakeUp element - we are not interpolating anymore
+	          NAF.physics.wakeUp(this.el);
+	          NAF.physics.updatePhysics(this.el, physics);
+	        } else {
+	          // Put element to sleep since we are now interpolating to remote physics data
+	          NAF.physics.sleep(this.el);
+	          NAF.physics.attachPhysicsLerp(this.el, physics);
+	        }
+
+	        this.lastPhysicsUpdateTimestamp = physics.timestamp;
+	      }
+	    }
+	  },
+
+	  handlePhysicsCollision: function handlePhysicsCollision(e) {
+	    // FIXME: right now, this seems to allow race conditions that lead to stranded net entities...
+	    if (NAF.options.useShare && !NAF.options.collisionOwnership) {
+	      return;
+	    }
+
+	    // When a Collision happens, inherit ownership to collided object
+	    // so we can make sure, that my physics get propagated
+	    if (this.isMine()) {
+	      var collisionData = NAF.physics.getDataFromCollision(e);
+	      if (collisionData.el) {
+	        var collisionShare = collisionData.el.components["networked-share"];
+	        if (collisionShare) {
+	          var owner = collisionShare.data.owner;
+	          if (owner !== NAF.clientId) {
+	            if (NAF.physics.isStrongerThan(this.el, collisionData.body) || owner === "") {
+	              collisionData.el.components["networked-share"].takeOwnership();
+	              NAF.log.write("Networked-Share: Inheriting ownership after collision to: ", collisionData.el.id);
+	            }
+	          }
+	        }
+	      }
+	    }
+	  },
+
+	  compressSyncData: function compressSyncData(syncData) {
+	    var compressed = [];
+	    compressed.push(1);
+	    compressed.push(syncData.networkId);
+	    compressed.push(syncData.owner);
+	    compressed.push(syncData.parent);
+	    compressed.push(syncData.template);
+
+	    var compMap = this.compressComponents(syncData.components);
+	    compressed.push(compMap);
+
+	    compressed.push(syncData.takeover);
+	    return compressed;
+	  },
+
+	  compressComponents: function compressComponents(syncComponents) {
+	    var compMap = {};
+	    var components = this.getAllSyncedComponents();
+	    for (var i = 0; i < components.length; i++) {
+	      var name;
+	      if (typeof components[i] === 'string') {
+	        name = components[i];
+	      } else {
+	        name = naf.utils.childSchemaToKey(components[i]);
+	      }
+	      if (syncComponents.hasOwnProperty(name)) {
+	        compMap[i] = syncComponents[name];
+	      }
+	    }
+	    return compMap;
+	  },
+
+	  /**
+	    Decompressed packet structure:
+	    [
+	      0: 0, // 0 for uncompressed
+	      networkId: networkId,
+	      owner: clientId,
+	      parent: parentNetworkId,
+	      template: template,
+	      components: {
+	        position: data,
+	        scale: data,
+	        .head|||visible: data
+	      },
+	      takeover: data
+	    ]
+	  */
+	  decompressSyncData: function decompressSyncData(compressed) {
+	    var entityData = {};
+	    entityData[0] = 1;
+	    entityData.networkId = compressed[1];
+	    entityData.owner = compressed[2];
+	    entityData.parent = compressed[3];
+	    entityData.template = compressed[4];
+
+	    var compressedComps = compressed[5];
+	    var components = this.decompressComponents(compressedComps);
+	    entityData.components = components;
+
+	    entityData.takeover = compressed[6];
+	    return entityData;
+	  },
+
+	  decompressComponents: function decompressComponents(compressed) {
+	    var decompressed = {};
+	    for (var i in compressed) {
+	      var name;
+	      var schemaComp = this.data.components[i];
+
+	      if (typeof schemaComp === "string") {
+	        name = schemaComp;
+	      } else {
+	        name = naf.utils.childSchemaToKey(schemaComp);
+	      }
+	      decompressed[name] = compressed[i];
+	    }
+	    return decompressed;
+	  },
+
+	  isSyncableComponent: function isSyncableComponent(key) {
+	    if (naf.utils.isChildSchemaKey(key)) {
+	      var schema = naf.utils.keyToChildSchema(key);
+	      return this.hasThisChildSchema(schema);
+	    } else {
+	      return this.data.components.indexOf(key) != -1;
+	    }
+	  },
+
+	  updateCache: function updateCache(components) {
+	    for (var name in components) {
+	      this.cachedData[name] = components[name];
+	    }
+	  },
+
+	  hasThisChildSchema: function hasThisChildSchema(schema) {
+	    var schemaComponents = this.data.components;
+	    for (var i in schemaComponents) {
+	      var localChildSchema = schemaComponents[i];
+	      if (naf.utils.childSchemaEqual(localChildSchema, schema)) {
 	        return true;
 	      }
 	    }
 	    return false;
 	  },
 
-	  /* Static schema calls */
+	  remove: function remove() {
+	    this.removeOwnership();
 
-	  childSchemaToKey: function childSchemaToKey(childSchema) {
-	    return childSchema.selector + naf.utils.delimiter + childSchema.component;
-	  },
+	    var data = { networkId: this.networkId };
+	    naf.connection.broadcastDataGuaranteed('r', data);
 
-	  isChildSchemaKey: function isChildSchemaKey(key) {
-	    return key.indexOf(naf.utils.delimiter) != -1;
-	  },
-
-	  keyToChildSchema: function keyToChildSchema(key) {
-	    var split = key.split(naf.utils.delimiter);
-	    return {
-	      selector: split[0],
-	      component: split[1]
-	    };
-	  },
-
-	  childSchemaEqual: function childSchemaEqual(a, b) {
-	    return a.selector == b.selector && a.component == b.component;
+	    this.unbindOwnershipEvents();
+	    this.unbindOwnerEvents();
+	    this.unbindRemoteEvents();
 	  }
 	});
+
+/***/ }),
+/* 68 */
+/***/ (function(module, exports, __webpack_require__) {
+
+	'use strict';
+
+	var naf = __webpack_require__(47);
+
+	AFRAME.registerComponent('networked-adhoc', {
+	  schema: {
+	    physics: { default: false },
+	    networkId: { default: '' },
+	    components: { default: '' }
+	  },
+	  init: function init() {
+	    addNetEntityFromElement(this.el, this.data.networkId, this.data);
+	  }
+	});
+
+	function addNetEntityFromElement(el, networkId, data) {
+	  if (!networkId) {
+	    networkId = Math.random().toString(36).substring(2, 9);
+	  }
+
+	  // make an inline data URI template from the given element
+
+	  el.flushToDOM(); // assume this is synchronous
+	  var n = el.cloneNode(true); // make a copy
+	  ['id', 'camera', 'look-controls', 'wasd-controls',
+	  // 'position', 'rotation',
+	  'networked', 'networked-share', 'networked-remote', 'networked-adhoc', 'dynamic-body', // 'static-body',
+	  'quaternion', 'velocity'].forEach(function (name) {
+	    n.removeAttribute(name);
+	  });
+
+	  var template = NAF.options.compressSyncPackets ? 'data:text/html;charset=utf-8;base64,' + btoa(n.outerHTML) : 'data:text/html;charset=utf-8,' + encodeURIComponent(n.outerHTML);
+
+	  //el.setAttribute('id', 'naf-' + networkId);
+	  el.setAttribute('networked-share', {
+	    physics: data.physics,
+	    template: template,
+	    components: data.components,
+	    showLocalTemplate: false,
+	    networkId: networkId
+	    // this is default now... owner: NAF.clientId // we own it to start
+	  });
+
+	  return el;
+	}
 
 /***/ })
 /******/ ]);

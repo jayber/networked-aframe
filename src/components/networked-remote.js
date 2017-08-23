@@ -1,4 +1,5 @@
 var naf = require('../NafIndex');
+var Compressor = require('../Compressor');
 
 AFRAME.registerComponent('networked-remote', {
   schema: {
@@ -9,10 +10,15 @@ AFRAME.registerComponent('networked-remote', {
   },
 
   init: function() {
-    this.attachTemplate(this.data.template);
+    var el = this.el;
+    var data = this.data;
+
+    if (data.template) {
+      this.attachTemplate(data.template);
+    }
     this.attachLerp();
 
-    if (this.el.firstUpdateData) {
+    if (el.firstUpdateData) {
       this.firstUpdate();
     }
   },
@@ -67,8 +73,13 @@ AFRAME.registerComponent('networked-remote', {
 
   networkUpdate: function(entityData) {
     if (entityData[0] == 1) {
-      entityData = this.decompressSyncData(entityData);
+      entityData = Compressor.decompressSyncData(entityData, this.data.components);
     }
+
+    if (entityData.physics) {
+      this.updatePhysics(entityData.physics);
+    }
+
     this.updateComponents(entityData.components);
   },
 
@@ -76,11 +87,16 @@ AFRAME.registerComponent('networked-remote', {
     for (var key in components) {
       if (this.isSyncableComponent(key)) {
         var data = components[key];
-        if (this.isChildSchemaKey(key)) {
-          var schema = this.keyToChildSchema(key);
-          var childEl = this.el.querySelector(schema.selector);
+        if (naf.utils.isChildSchemaKey(key)) {
+          var schema = naf.utils.keyToChildSchema(key);
+          var childEl = schema.selector ? this.el.querySelector(schema.selector) : this.el;
           if (childEl) { // Is false when first called in init
-            childEl.setAttribute(schema.component, data);
+            if (schema.property) {
+              childEl.setAttribute(schema.component, schema.property, data);
+            }
+            else {
+              childEl.setAttribute(schema.component, data);
+            }
           }
         } else {
           this.el.setAttribute(key, data);
@@ -89,55 +105,20 @@ AFRAME.registerComponent('networked-remote', {
     }
   },
 
-  /**
-    Decompressed packet structure:
-    [
-      0: 0, // 0 for uncompressed
-      networkId: networkId,
-      owner: clientId,
-      parent: parentNetworkId,
-      template: template,
-      components: {
-        position: data,
-        scale: data,
-        .head|||visible: data
-      }
-    ]
-  */
-  decompressSyncData: function(compressed) {
-    var entityData = {};
-    entityData[0] = 1;
-    entityData.networkId = compressed[1];
-    entityData.owner = compressed[2];
-    entityData.parent = compressed[3];
-    entityData.template = compressed[4];
-
-    var compressedComps = compressed[5];
-    var components = this.decompressComponents(compressedComps);
-    entityData.components = components;
-
-    return entityData;
-  },
-
-  decompressComponents: function(compressed) {
-    var decompressed = {};
-    for (var i in compressed) {
-      var name;
-      var schemaComp = this.data.components[i];
-
-      if (typeof schemaComp === "string") {
-        name = schemaComp;
+  updatePhysics: function(physics) {
+    if (physics) {
+      if (NAF.options.useLerp) {
+        NAF.physics.attachPhysicsLerp(this.el, physics);
       } else {
-        name = this.childSchemaToKey(schemaComp);
+        NAF.physics.detachPhysicsLerp(this.el);
+        NAF.physics.updatePhysics(this.el, physics);
       }
-      decompressed[name] = compressed[i];
     }
-    return decompressed;
   },
 
   isSyncableComponent: function(key) {
-    if (this.isChildSchemaKey(key)) {
-      var schema = this.keyToChildSchema(key);
+    if (naf.utils.isChildSchemaKey(key)) {
+      var schema = naf.utils.keyToChildSchema(key);
       return this.hasThisChildSchema(schema);
     } else {
       return this.data.components.indexOf(key) != -1;
@@ -148,32 +129,10 @@ AFRAME.registerComponent('networked-remote', {
     var schemaComponents = this.data.components;
     for (var i in schemaComponents) {
       var localChildSchema = schemaComponents[i];
-      if (this.childSchemaEqual(localChildSchema, schema)) {
+      if (naf.utils.childSchemaEqual(localChildSchema, schema)) {
         return true;
       }
     }
     return false;
   },
-
-  /* Static schema calls */
-
-  childSchemaToKey: function(childSchema) {
-    return childSchema.selector + naf.utils.delimiter + childSchema.component;
-  },
-
-  isChildSchemaKey: function(key) {
-    return key.indexOf(naf.utils.delimiter) != -1;
-  },
-
-  keyToChildSchema: function(key) {
-    var split = key.split(naf.utils.delimiter);
-    return {
-      selector: split[0],
-      component: split[1]
-    };
-  },
-
-  childSchemaEqual: function(a, b) {
-    return a.selector == b.selector && a.component == b.component;
-  }
 });
