@@ -19,7 +19,7 @@ class EasyRtcInterface extends NetworkInterface {
     this.easyrtc.joinRoom(roomId, null);
   }
 
-  setRoomOccupantListener(occupantListener){
+  setRoomOccupantListener(occupantListener) {
     this.easyrtc.setRoomOccupantListener(occupantListener);
   }
 
@@ -44,6 +44,17 @@ class EasyRtcInterface extends NetworkInterface {
     this.loginFailure = failureListener;
   }
 
+  setCloseListeners(socketDisconnectListener, peerClosedListener, streamCloseListener) {
+    this.easyrtc.setDisconnectListener(socketDisconnectListener);
+    this.easyrtc.setPeerClosedListener(peerClosedListener);
+    this.streamCloseListener = streamCloseListener;
+  }
+
+  setApiFields(fields) {
+    for (var el in fields) {
+      this.easyrtc.setRoomApiField(naf.room, el, fields[el]);
+    }
+  }
 
   /*
    * Network actions
@@ -51,7 +62,7 @@ class EasyRtcInterface extends NetworkInterface {
 
   connect(appId) {
     var that = this;
-    var loginSuccessCallback = function(id) {
+    var loginSuccessCallback = function (id) {
       that.myRoomJoinTime = that.getRoomJoinTime(id);
       that.loginSuccess(id);
     };
@@ -66,23 +77,24 @@ class EasyRtcInterface extends NetworkInterface {
   connectWithAudio(appId, loginSuccess, loginFailure) {
     var that = this;
 
-    this.easyrtc.setStreamAcceptor(function(easyrtcid, stream) {
+    this.easyrtc.setStreamAcceptor(function (easyrtcid, stream) {
       var audioEl = document.createElement("audio");
       audioEl.setAttribute('id', 'audio-' + easyrtcid);
       document.body.appendChild(audioEl);
-      that.easyrtc.setVideoObjectSrc(audioEl,stream);
+      that.easyrtc.setVideoObjectSrc(audioEl, stream);
     });
 
     this.easyrtc.setOnStreamClosed(function (easyrtcid) {
       var audioEl = document.getElementById('audio-' + easyrtcid);
       audioEl.parentNode.removeChild(audioEl);
+      this.streamCloseListener(easyrtcid);
     });
 
     this.easyrtc.initMediaSource(
-      function(){
+      function () {
         that.easyrtc.connect(appId, loginSuccess, loginFailure);
       },
-      function(errorCode, errmesg){
+      function (errorCode, errmesg) {
         console.error(errorCode, errmesg);
       }
     );
@@ -94,15 +106,15 @@ class EasyRtcInterface extends NetworkInterface {
 
   startStreamConnection(networkId) {
     this.easyrtc.call(networkId,
-      function(caller, media) {
+      function (caller, media) {
         if (media === 'datachannel') {
           naf.log.write('Successfully started datachannel to ', caller);
         }
       },
-      function(errorCode, errorText) {
+      function (errorCode, errorText) {
         console.error(errorCode, errorText);
       },
-      function(wasAccepted) {
+      function (wasAccepted) {
         // console.log("was accepted=" + wasAccepted);
       }
     );

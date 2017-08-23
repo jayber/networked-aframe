@@ -1,4 +1,6 @@
+var log = require("./NafLogger");
 var NetworkInterface = require('./network_interfaces/NetworkInterface');
+
 
 class NetworkConnection {
 
@@ -33,19 +35,36 @@ class NetworkConnection {
       video: false,
       datachannel: true
     };
+
+    var reconnector = (source) => (id) => {
+      this.serverLog(id, `closed: ${source}`);
+    };
+
     this.network.setStreamOptions(streamOptions);
     this.network.setDatachannelListeners(
-        this.dcOpenListener.bind(this),
-        this.dcCloseListener.bind(this),
-        this.receiveDataChannelMessage.bind(this)
+      this.dcOpenListener.bind(this),
+      this.dcCloseListener(reconnector("data")).bind(this),
+      this.receiveDataChannelMessage.bind(this)
     );
+    this.network.setCloseListeners(reconnector("socket"), reconnector("peer"), reconnector("stream"));
     this.network.setLoginListeners(
-        this.loginSuccess.bind(this),
-        this.loginFailure.bind(this)
+      this.loginSuccess.bind(this),
+      this.loginFailure.bind(this)
     );
     this.network.setRoomOccupantListener(this.occupantsReceived.bind(this));
     this.network.joinRoom(roomId);
     this.network.connect(appId);
+  }
+
+  setApiFields(fields) {
+    if (this.network) {
+      this.network.setApiFields(fields);
+    }
+  }
+
+  serverLog (id, message) {
+    let name = readCookie('name');
+    $.get("log", {user: `${name}-${id}`, message: message});
   }
 
   onLogin(callback) {
@@ -69,8 +88,13 @@ class NetworkConnection {
     this.loggedIn = false;
   }
 
+
   occupantsReceived(roomName, occupantList, isPrimary) {
+    console.log("occupants received");
     this.checkForDisconnectingClients(this.connectList, occupantList);
+    for (var p in occupantList) {
+      this.onOccupantReceived(occupantList[p]);
+    }
     this.connectList = occupantList;
     this.checkForConnectingClients(occupantList);
   }
@@ -117,10 +141,13 @@ class NetworkConnection {
     this.entities.completeSync();
   }
 
-  dcCloseListener(id) {
-    NAF.log.write('Closed data channel from ' + id);
-    this.dcIsActive[id] = false;
-    this.entities.removeEntitiesFromUser(id);
+  dcCloseListener(reconnector) {
+    return (id) => {
+      NAF.log.write('Closed data channel from ' + id);
+      this.dcIsActive[id] = false;
+      this.entities.removeEntitiesFromUser(id);
+      reconnector(id);
+    }
   }
 
   dcIsConnectedTo(user) {

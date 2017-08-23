@@ -16,6 +16,7 @@ class NetworkInterface extends NafInterface {
   setDatachannelListeners(openListener, closedListener, messageListener) {this.notImplemented()}
   setRoomOccupantListener(occupantListener){this.notImplemented()}
   setLoginListeners(successListener, failureListener) {this.notImplemented()}
+  setCloseListeners(socketDisconnectListener, peerClosedListener, streamCloseListener) {this.notImplemented()}
 
   connect(appId) {this.notImplemented()}
   shouldStartConnectionTo() {this.notImplemented()}
@@ -24,6 +25,7 @@ class NetworkInterface extends NafInterface {
   sendData(networkId, dataType, data) {this.notImplemented()}
   sendDataGuaranteed(networkId, dataType, data) {this.notImplemented()}
   getConnectStatus(networkId) {this.notImplemented()}
+  setApiFields(fields) {this.notImplemented()}
 }
 
 NetworkInterface.IS_CONNECTED = 'IS_CONNECTED';

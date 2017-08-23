@@ -20,3 +20,4 @@ class NafLogger {
 }
 
 module.exports = NafLogger;
+
