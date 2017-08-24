@@ -82,6 +82,7 @@ class NetworkConnection {
     NAF.clientId = clientId;
     this.loggedIn = true;
 
+    this.serverLog(clientId, `loggedIn: ${clientId}`);
     document.body.dispatchEvent(this.onLoggedInEvent);
   }
 
@@ -92,8 +93,10 @@ class NetworkConnection {
 
   occupantsReceived(roomName, occupantList, isPrimary) {
     this.checkForDisconnectingClients(this.connectList, occupantList);
-    for (var p in occupantList) {
-      this.onOccupantReceived(occupantList[p]);
+    if (this.onOccupantReceived) {
+      for (var p in occupantList) {
+        this.onOccupantReceived(occupantList[p]);
+      }
     }
     this.connectList = occupantList;
     this.checkForConnectingClients(occupantList);
@@ -144,21 +147,15 @@ class NetworkConnection {
     document.body.dispatchEvent(this.onDCOpenEvent);
   }
 
-  dcCloseListener(id) {
-    NAF.log.write('Closed data channel from ' + id);
-    this.dcIsActive[id] = false;
-    this.entities.removeEntitiesFromUser(id);
-    document.body.dispatchEvent(this.onDCCloseEvent);
+  dcCloseListener(reconnector) {
+    return (id) => {
+      NAF.log.write('Closed data channel from ' + id);
+      this.dcIsActive[id] = false;
+      this.entities.removeEntitiesFromUser(id);
+      document.body.dispatchEvent(this.onDCCloseEvent);
+      reconnector(id);
+    }
   }
-  /*
-  * dcCloseListener(reconnector) {
-   return (id) => {
-   NAF.log.write('Closed data channel from ' + id);
-   this.dcIsActive[id] = false;
-   this.entities.removeEntitiesFromUser(id);
-   reconnector(id);
-   }
-   }*/
 
   dcIsConnectedTo(user) {
     return this.dcIsActive.hasOwnProperty(user) && this.dcIsActive[user];
